@@ -1,0 +1,66 @@
+name: Sync Units to Webflow
+
+on:
+  # Run daily at 2 AM UTC
+  schedule:
+    - cron: '0 2 * * *'
+  
+  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run in dry-run mode (preview only)'
+        required: false
+        default: 'false'
+        type: boolean
+      publish:
+        description: 'Auto-publish updated items'
+        required: false
+        default: 'true'
+        type: boolean
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Run sync script
+      env:
+        WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
+      run: |
+        # Build command based on inputs
+        CMD="python sync_units_github_to_webflow.py"
+        
+        if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+          CMD="$CMD --dry-run"
+        fi
+        
+        if [ "${{ github.event.inputs.publish }}" = "true" ] && [ "${{ github.event.inputs.dry_run }}" != "true" ]; then
+          CMD="$CMD --publish"
+        fi
+        
+        echo "Running: $CMD"
+        $CMD
+        
+    - name: Upload sync results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: sync-results-${{ github.run_number }}
+        path: |
+          *.log
+        retention-days: 30

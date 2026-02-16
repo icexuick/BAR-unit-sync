@@ -1,8 +1,11 @@
-# Beyond All Reason - GitHub to Webflow Unit Sync
+# Beyond All Reason - GitHub to Webflow Unit Sync 🔄
 
-This script automatically syncs unit data from the [Beyond All Reason GitHub repository](https://github.com/beyond-all-reason/Beyond-All-Reason) to your Webflow CMS Units collection.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
 
-## Features
+Automatically sync unit data from the [Beyond All Reason GitHub repository](https://github.com/beyond-all-reason/Beyond-All-Reason) to your Webflow CMS Units collection.
+
+## 🎯 Features
 
 - ✅ Automatically fetches all `.lua` unit files from GitHub
 - ✅ Parses unit definitions and extracts relevant data
@@ -12,8 +15,9 @@ This script automatically syncs unit data from the [Beyond All Reason GitHub rep
 - ✅ Optional auto-publishing of updated items
 - ✅ Detailed logging and progress reporting
 - ✅ Error handling and recovery
+- ✅ Recursive directory scanning
 
-## Field Mapping
+## 📊 Field Mapping
 
 The following fields are synced from GitHub to Webflow:
 
@@ -21,7 +25,7 @@ The following fields are synced from GitHub to Webflow:
 |-------------------|---------------|-------------|
 | `energycost` | Energy Cost | Energy required to build |
 | `metalcost` | Metal Cost | Metal required to build |
-| `buildtime` | Build Cost | Time to build (buildtime) |
+| `buildtime` | Build Cost | Time to build |
 | `energymake` | Energy Make | Energy production |
 | `workertime` | Buildpower | Construction power |
 | `health` | Health | Unit health points |
@@ -30,69 +34,64 @@ The following fields are synced from GitHub to Webflow:
 | `radardistance` | Radarrange | Radar range |
 | `sonardistance` | Sonarrange | Sonar range |
 | `jammerdistance` | Jammerrange | Jammer range |
-| `mass` | Mass | Unit mass (if field exists) |
-| `paralyzemultiplier` | Paralyze Multiplier | Paralysis resistance (if field exists) |
-| `cloakcost` | Cloak Cost | Cloaking energy cost (if field exists) |
 
 **Note:** Weapon-related fields (Weapons, DPS, Weapon Range) are NOT synced and remain manually managed.
 
-## Prerequisites
+## 🚀 Quick Start
+
+### Prerequisites
 
 - Python 3.7 or higher
 - Webflow API token with write access to the CMS
-- Internet connection to access GitHub and Webflow APIs
+- Internet connection
 
-## Installation
+### Installation
 
-1. **Clone or download this script:**
+1. **Clone this repository:**
    ```bash
-   # If you have the script files
-   cd /path/to/script/directory
+   git clone https://github.com/your-username/bar-unit-sync.git
+   cd bar-unit-sync
    ```
 
-2. **Install Python dependencies:**
+2. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
 
-3. **Set up your Webflow API token:**
-   
-   You need a Webflow API token with CMS write permissions. Get one from:
-   https://webflow.com/dashboard/account/apps
+3. **Configure your API token:**
+   ```bash
+   cp .env.example .env
+   # Edit .env and add your Webflow API token
+   ```
 
-   Then either:
-   - Set it as an environment variable:
-     ```bash
-     export WEBFLOW_API_TOKEN="your-token-here"
-     ```
-   - Or pass it via command line flag (see Usage below)
+   Or set it as an environment variable:
+   ```bash
+   export WEBFLOW_API_TOKEN="your-token-here"
+   ```
 
-## Usage
-
-### Basic Commands
+### Usage
 
 **Dry Run (recommended first time):**
 ```bash
 python sync_units_github_to_webflow.py --dry-run
 ```
-This shows what would be updated without making any changes.
 
 **Sync and Update:**
 ```bash
 python sync_units_github_to_webflow.py
 ```
-Updates items in Webflow but doesn't publish them (leaves as drafts).
 
 **Sync and Auto-Publish:**
 ```bash
 python sync_units_github_to_webflow.py --publish
 ```
-Updates items and automatically publishes them.
 
 **Sync with Token:**
 ```bash
 python sync_units_github_to_webflow.py --token "your-webflow-token"
 ```
+
+## 📖 Documentation
 
 ### Command Line Options
 
@@ -103,7 +102,7 @@ python sync_units_github_to_webflow.py --token "your-webflow-token"
 | `--token TOKEN` | Provide Webflow API token via command line |
 | `--help` | Show help message |
 
-## Example Output
+### Example Output
 
 ```
 ================================================================================
@@ -124,16 +123,6 @@ Processing: armfast (units/ArmBots/T2/armfast.lua)
      metal-cost: 171 → 160
   ✅ Updated successfully
 
-Processing: armcom (units/ArmCommanders/armcom.lua)
-  ✓ No changes needed
-
-Processing: cormist (units/CorVehicles/cormist.lua)
-  📝 Changes detected:
-     health: 450 → 470
-  ✅ Updated successfully
-
-...
-
 ================================================================================
 Sync Summary
 ================================================================================
@@ -144,23 +133,11 @@ Not found in Webflow: 15
 Errors: 3
 ```
 
-## Automation Options
+## 🤖 Automation
 
-### Option 1: Cron Job (Linux/Mac)
+### GitHub Actions (Recommended)
 
-Run the sync automatically every day at 2 AM:
-
-```bash
-# Edit your crontab
-crontab -e
-
-# Add this line:
-0 2 * * * cd /path/to/script && /usr/bin/python3 sync_units_github_to_webflow.py --publish >> /var/log/bar-sync.log 2>&1
-```
-
-### Option 2: GitHub Actions
-
-Create a GitHub Action workflow that runs the sync on a schedule or when unit files change.
+This repository includes a GitHub Actions workflow that automatically syncs units on a schedule.
 
 Create `.github/workflows/sync-to-webflow.yml`:
 
@@ -187,52 +164,57 @@ jobs:
         python-version: '3.11'
         
     - name: Install dependencies
-      run: |
-        pip install -r requirements.txt
+      run: pip install -r requirements.txt
         
     - name: Run sync
       env:
         WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
-      run: |
-        python sync_units_github_to_webflow.py --publish
+      run: python sync_units_github_to_webflow.py --publish
 ```
 
-Don't forget to add `WEBFLOW_API_TOKEN` to your repository secrets!
+**Setup:**
+1. Go to your repository Settings → Secrets and variables → Actions
+2. Add a new secret: `WEBFLOW_API_TOKEN`
+3. Paste your Webflow API token
+4. The workflow will run automatically every day at 2 AM UTC
 
-### Option 3: Windows Task Scheduler
+### Cron Job (Linux/Mac)
+
+```bash
+# Edit crontab
+crontab -e
+
+# Add this line (runs daily at 2 AM)
+0 2 * * * cd /path/to/bar-unit-sync && python3 sync_units_github_to_webflow.py --publish >> /var/log/bar-sync.log 2>&1
+```
+
+### Windows Task Scheduler
 
 1. Open Task Scheduler
-2. Create a new task
-3. Set trigger (e.g., daily at 2 AM)
-4. Set action: 
+2. Create Basic Task
+3. Set trigger: Daily at 2:00 AM
+4. Set action:
    - Program: `python`
    - Arguments: `sync_units_github_to_webflow.py --publish`
-   - Start in: `C:\path\to\script`
+   - Start in: `C:\path\to\bar-unit-sync`
 
-## Troubleshooting
+## 🧪 Testing
 
-### "Error: Webflow API token required"
+Run the test script to verify everything works:
 
-Make sure you've set the `WEBFLOW_API_TOKEN` environment variable or pass it via `--token` flag.
+```bash
+python test_sync.py
+```
 
-### "Unit 'xyz' not found in Webflow"
+This will:
+- Test the Lua parsing logic
+- Verify field mapping
+- Test GitHub API fetching
+- Validate expected outputs
 
-The unit exists in GitHub but not in your Webflow CMS. You'll need to create it manually in Webflow first.
+## 🔧 Configuration
 
-### "Failed to parse file"
-
-The Lua file might have a different structure than expected. Check the file manually on GitHub.
-
-### Rate Limits
-
-If you're processing many units, you might hit API rate limits. The script will show errors if this happens. Consider:
-- Running less frequently
-- Processing units in smaller batches
-- Contacting Webflow support for higher limits
-
-## Configuration
-
-You can modify these constants in the script:
+Edit these constants in `sync_units_github_to_webflow.py` if needed:
 
 ```python
 GITHUB_REPO = "beyond-all-reason/Beyond-All-Reason"
@@ -242,41 +224,77 @@ WEBFLOW_SITE_ID = "5c68622246b367adf6f3041d"
 WEBFLOW_COLLECTION_ID = "6564c6553676389f8ba45a9e"
 ```
 
-### Adding New Field Mappings
+### Adding New Fields
 
 To sync additional fields, add them to the `FIELD_MAPPING` dictionary:
 
 ```python
 FIELD_MAPPING = {
     "energycost": "energy-cost",
-    "metalcost": "metal-cost",
-    # Add new mappings here:
-    "your_github_field": "your-webflow-field",
+    "your_new_field": "your-webflow-slug",
 }
 ```
 
-### Skipping Fields
+**Important:** Make sure the field exists in your Webflow CMS collection first!
 
-To skip certain fields (like weapon stats), add them to `SKIP_FIELDS`:
+## 🐛 Troubleshooting
 
-```python
-SKIP_FIELDS = ["weapons", "dps", "weaponrange"]
-```
+### "Error: Webflow API token required"
+Set the `WEBFLOW_API_TOKEN` environment variable or use `--token` flag.
 
-## Security Notes
+### "Unit 'xyz' not found in Webflow"
+The unit exists in GitHub but not in Webflow. Create it manually in Webflow first.
 
-- Never commit your Webflow API token to version control
-- Use environment variables or GitHub Secrets for tokens
-- Keep your API token secure and rotate it periodically
-- The script only makes PATCH requests to update existing items
+### "Failed to parse file"
+The Lua file structure might be different than expected. Check the file on GitHub.
 
-## Support
+### Rate Limits
+If processing many units hits API limits, consider:
+- Running less frequently
+- Processing in smaller batches
+- Contacting Webflow support for higher limits
+
+## 📝 Adding Missing Fields to Webflow
+
+The following fields from the request are not yet in Webflow:
+- `mass` (Mass)
+- `paralyzemultiplier` (Paralyze Multiplier)  
+- `cloakcost` (Cloak Cost)
+
+To add these:
+1. Go to Webflow CMS → Units collection → Settings
+2. Add new fields with appropriate types (Number)
+3. Update `FIELD_MAPPING` in the script
+4. Run sync
+
+## 🔒 Security
+
+- ⚠️ Never commit your `.env` file or API tokens
+- ✅ Use environment variables or GitHub Secrets
+- ✅ Rotate API tokens periodically
+- ✅ The script only makes PATCH requests to update existing items
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE) file for details
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## 📧 Support
 
 For issues or questions:
-- Check the Webflow API documentation: https://developers.webflow.com/
-- Review the Beyond All Reason GitHub: https://github.com/beyond-all-reason/Beyond-All-Reason
-- Check script logs for detailed error messages
+- Open an issue in this repository
+- Check [Webflow API documentation](https://developers.webflow.com/)
+- Review [Beyond All Reason GitHub](https://github.com/beyond-all-reason/Beyond-All-Reason)
 
-## License
+## 🙏 Acknowledgments
 
-This script is provided as-is for the Beyond All Reason project.
+- Beyond All Reason development team
+- Webflow API documentation
+- Python community
+
+---
+
+Made with ❤️ for the Beyond All Reason community
