@@ -20,6 +20,10 @@ import re
 import json
 from typing import Dict, List, Optional, Any
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configuration
 GITHUB_REPO = "beyond-all-reason/Beyond-All-Reason"
@@ -55,11 +59,17 @@ SKIP_FIELDS = ["weapons", "dps", "weaponrange"]
 class GitHubUnitFetcher:
     """Fetches unit .lua files from GitHub repository."""
     
-    def __init__(self, repo: str, branch: str):
+    def __init__(self, repo: str, branch: str, github_token: Optional[str] = None):
         self.repo = repo
         self.branch = branch
         self.base_url = f"https://api.github.com/repos/{repo}"
         self.raw_url = f"https://raw.githubusercontent.com/{repo}/refs/heads/{branch}"
+        self.github_token = github_token
+        
+        # Setup headers with auth if token provided
+        self.headers = {}
+        if self.github_token:
+            self.headers['Authorization'] = f'token {self.github_token}'
         
     def get_unit_files(self, path: str) -> List[Dict[str, str]]:
         """
@@ -70,7 +80,7 @@ class GitHubUnitFetcher:
         
         try:
             url = f"{self.base_url}/contents/{path}?ref={self.branch}"
-            response = requests.get(url)
+            response = requests.get(url, headers=self.headers)
             response.raise_for_status()
             items = response.json()
             
@@ -487,7 +497,7 @@ Examples:
         sys.exit(1)
     
     # Initialize services
-    github_fetcher = GitHubUnitFetcher(GITHUB_REPO, GITHUB_BRANCH)
+    github_fetcher = GitHubUnitFetcher(GITHUB_REPO, GITHUB_BRANCH, github_token=os.environ.get("GITHUB_TOKEN"))
     webflow_api = WebflowAPI(api_token, WEBFLOW_SITE_ID, WEBFLOW_COLLECTION_ID)
     sync_service = UnitSyncService(github_fetcher, webflow_api)
     

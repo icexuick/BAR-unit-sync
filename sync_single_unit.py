@@ -14,6 +14,10 @@ Usage:
 import os
 import sys
 import argparse
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Import from the main sync script
 from sync_units_github_to_webflow import (
@@ -43,7 +47,7 @@ def sync_single_unit(unit_name: str, dry_run: bool = False, auto_publish: bool =
     print()
     
     # Initialize services
-    github = GitHubUnitFetcher(GITHUB_REPO, GITHUB_BRANCH)
+    github = GitHubUnitFetcher(GITHUB_REPO, GITHUB_BRANCH, github_token=os.environ.get("GITHUB_TOKEN"))
     webflow = WebflowAPI(api_token, WEBFLOW_SITE_ID, WEBFLOW_COLLECTION_ID)
     parser = LuaParser()
     
