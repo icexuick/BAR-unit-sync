@@ -40,6 +40,9 @@ env/
 # Environment variables
 .env
 
+# Cache files
+.unit_cache.json
+
 # Logs
 *.log
 logs/

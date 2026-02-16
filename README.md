@@ -13,6 +13,8 @@ Automatically sync unit data from the [Beyond All Reason GitHub repository](http
 - ✅ Updates only fields that have changed
 - ✅ Supports dry-run mode to preview changes
 - ✅ Optional auto-publishing of updated items
+- ✅ **Persistent cache** - stores unit file list locally for fast subsequent runs
+- ✅ **Strategic icon sync** - downloads PNG from GitHub, converts to WebP (80% quality), uploads to Webflow Assets
 - ✅ Detailed logging and progress reporting
 - ✅ Error handling and recovery
 - ✅ Recursive directory scanning
@@ -34,6 +36,9 @@ The following fields are synced from GitHub to Webflow:
 | `radardistance` | Radarrange | Radar range |
 | `sonardistance` | Sonarrange | Sonar range |
 | `jammerdistance` | Jammerrange | Jammer range |
+| `mass` | Mass | Unit mass |
+| `cloakcost` | Cloak cost | Energy cost for cloaking |
+| `customparams.paralyzemultiplier` | Paralyze Multiplier | Paralyze damage multiplier |
 
 **Note:** Weapon-related fields (Weapons, DPS, Weapon Range) are NOT synced and remain manually managed.
 
@@ -99,8 +104,56 @@ python sync_units_github_to_webflow.py --token "your-webflow-token"
 |------|-------------|
 | `--dry-run` | Preview changes without updating Webflow |
 | `--publish` | Automatically publish updated items |
+| `--sync-icons` | Also sync strategic icons (PNG → WebP, 80% quality) |
+| `--clear-cache` | Clear the unit file cache before syncing |
 | `--token TOKEN` | Provide Webflow API token via command line |
 | `--help` | Show help message |
+
+### Cache System
+
+The script uses a **persistent cache** (`.unit_cache.json`) to store the list of unit files from GitHub. This means:
+
+- **First run**: Fetches all unit files from GitHub (~30-60 seconds)
+- **Subsequent runs**: Loads from cache (<1 second) ⚡
+
+**When to clear cache:**
+```bash
+# Clear cache if new units were added to GitHub
+python sync_single_unit.py armfast --clear-cache
+
+# Or for full sync
+python sync_units_github_to_webflow.py --clear-cache
+```
+
+The cache is automatically invalidated if you switch to a different repository or branch.
+
+### Strategic Icon Sync
+
+The script can automatically sync strategic icons for units:
+
+**How it works:**
+1. Parses `icontypes.lua` from BAR repository to find icon paths
+2. Downloads PNG icons from GitHub
+3. Converts PNG → WebP with 80% quality (preserves transparency)
+4. Uploads to Webflow Assets API
+5. Links asset to unit's `icon` field
+
+**Usage:**
+```bash
+# Sync with icons
+python sync_units_github_to_webflow.py --sync-icons
+
+# Dry run with icons (see what would be uploaded)
+python sync_units_github_to_webflow.py --sync-icons --dry-run
+
+# Sync icons and publish
+python sync_units_github_to_webflow.py --sync-icons --publish
+```
+
+**Requirements:**
+- Webflow API token with `assets:write` scope
+- Icon must exist in `icontypes.lua` for the unit
+- PNG file must be accessible in BAR repository
 
 ### Example Output
 

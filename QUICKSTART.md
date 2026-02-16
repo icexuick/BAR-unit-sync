@@ -62,6 +62,28 @@ Your units are now synced! The script will:
 - ✅ Parse the Lua definitions
 - ✅ Update changed fields in Webflow
 - ✅ Show you a detailed summary
+- ✅ Cache unit list for faster future runs ⚡
+
+**Note:** The first run takes ~30-60 seconds to fetch all unit files from GitHub. Subsequent runs are much faster (<1 second) because the unit list is cached in `.unit_cache.json`.
+
+## Pro Tips 💡
+
+### Clear Cache if GitHub Changed
+
+If new units were added to the GitHub repository:
+
+```bash
+python sync_units_github_to_webflow.py --clear-cache
+```
+
+### Test Single Unit
+
+Test changes on a single unit first:
+
+```bash
+python sync_single_unit.py armfast --dry-run
+python sync_single_unit.py armfast --publish
+```
 
 ## Next Steps
 

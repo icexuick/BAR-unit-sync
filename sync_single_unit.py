@@ -53,21 +53,14 @@ def sync_single_unit(unit_name: str, dry_run: bool = False, auto_publish: bool =
     
     # Step 1: Find the unit file on GitHub
     print(f"Step 1: Searching for {unit_name}.lua in GitHub...")
-    all_files = github.get_unit_files("units")
     
-    unit_file = None
-    for file_info in all_files:
-        if file_info['name'] == unit_name:
-            unit_file = file_info
-            break
+    unit_file = github.find_unit_file(unit_name)
     
     if not unit_file:
         print(f"❌ Error: Unit '{unit_name}' not found in GitHub repository")
-        print(f"   Searched {len(all_files)} files")
+        print(f"   Make sure the unit name is correct (e.g., 'armfast', not 'Sprinter')")
         print()
-        print("Available units (first 10):")
-        for file_info in all_files[:10]:
-            print(f"  - {file_info['name']}")
+        print("💡 Tip: Unit names are the internal .lua filenames, not display names")
         return False
     
     print(f"✅ Found: {unit_file['path']}")
@@ -94,17 +87,38 @@ def sync_single_unit(unit_name: str, dry_run: bool = False, auto_publish: bool =
     for key in sorted(FIELD_MAPPING.keys()):
         if key in github_data:
             print(f"  {key}: {github_data[key]}")
+    # Also show paralyzemultiplier if it exists
+    if 'paralyzemultiplier' in github_data:
+        print(f"  paralyzemultiplier (from customparams): {github_data['paralyzemultiplier']}")
     print()
     
     # Step 3: Map to Webflow fields
     print("Step 3: Mapping to Webflow fields...")
     webflow_fields = {}
+    
+    # Map standard fields
     for github_key, webflow_key in FIELD_MAPPING.items():
         if github_key in github_data:
             value = github_data[github_key]
-            if isinstance(value, (int, float)):
-                value = int(value)
+            
+            # Type conversion for integer fields
+            if webflow_key in ["energy-cost", "metal-cost", "build-cost", "energy-make", 
+                               "buildpower", "health", "speed", "sightrange", "radarrange", 
+                               "metal-make", "jammerrange", "mass", "cloak-cost"]:
+                try:
+                    if isinstance(value, (int, float)):
+                        value = int(value)
+                except:
+                    pass
+            
             webflow_fields[webflow_key] = value
+    
+    # Handle paralyzemultiplier separately (from customparams, decimal field)
+    if 'paralyzemultiplier' in github_data:
+        try:
+            webflow_fields['paralyze-multiplier'] = float(github_data['paralyzemultiplier'])
+        except:
+            pass
     
     if not webflow_fields:
         print("⚠️  Warning: No fields to sync")
@@ -175,11 +189,11 @@ def sync_single_unit(unit_name: str, dry_run: bool = False, auto_publish: bool =
     
     # Step 7: Publish (if requested)
     if auto_publish:
-        print("Step 7: Publishing...")
+        print("Step 7: Publishing item...")
         publish_success = webflow.publish_item(webflow_item['id'])
         
         if publish_success:
-            print("✅ Successfully published!")
+            print("✅ Item published successfully!")
         else:
             print("⚠️  Warning: Update succeeded but publish failed")
         print()
@@ -234,6 +248,12 @@ Examples:
         help='Webflow API token (or set WEBFLOW_API_TOKEN env var)'
     )
     
+    parser.add_argument(
+        '--clear-cache',
+        action='store_true',
+        help='Clear the unit file cache before syncing'
+    )
+    
     args = parser.parse_args()
     
     # Get API token
@@ -243,11 +263,23 @@ Examples:
         print("Set WEBFLOW_API_TOKEN environment variable or use --token")
         sys.exit(1)
     
+    # Clear cache if requested
+    if args.clear_cache:
+        github = GitHubUnitFetcher(GITHUB_REPO, GITHUB_BRANCH, github_token=os.environ.get("GITHUB_TOKEN"))
+        github.clear_cache()
+        print()
+    
+    # Check for auto-publish setting from environment if --publish not explicitly set
+    auto_publish = args.publish
+    if not auto_publish:
+        env_auto_publish = os.environ.get("AUTO_PUBLISH", "false").lower()
+        auto_publish = env_auto_publish in ("true", "1", "yes")
+    
     # Run sync
     success = sync_single_unit(
         args.unit,
         dry_run=args.dry_run,
-        auto_publish=args.publish,
+        auto_publish=auto_publish,
         api_token=api_token
     )
     
