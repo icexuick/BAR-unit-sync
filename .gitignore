@@ -42,6 +42,7 @@ env/
 
 # Cache files
 .unit_cache.json
+.buildable_cache.json
 
 # Logs
 *.log

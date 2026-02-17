@@ -129,31 +129,97 @@ The cache is automatically invalidated if you switch to a different repository o
 
 ### Strategic Icon Sync
 
-The script can automatically sync strategic icons for units:
+The script can automatically sync strategic icons for units by **committing them to your GitHub repository**:
 
 **How it works:**
 1. Parses `icontypes.lua` from BAR repository to find icon paths
-2. Downloads PNG icons from GitHub
+2. Downloads PNG icons from BAR GitHub repo
 3. Converts PNG → WebP with 80% quality (preserves transparency)
-4. Uploads to Webflow Assets API
-5. Links asset to unit's `icon` field
+4. **Commits WebP files to your repo** (e.g., `icons/armclaw.webp`)
+5. Uses GitHub raw URL in Webflow (e.g., `https://raw.githubusercontent.com/icexuick/bar-unit-sync/main/icons/armclaw.webp`)
+6. Links URL to unit's `icon` field in Webflow CMS
+
+**Benefits:**
+- ✅ **Fully public URLs** - no CORS issues
+- ✅ **Permanent links** - stable URLs for Webflow
+- ✅ **Version control** - track icon changes in Git history
+- ✅ **No external hosting** needed - GitHub hosts the images
+- ✅ **Easy updates** - script auto-commits on changes
+
+**Setup:**
+```bash
+# 1. Create GitHub Personal Access Token
+# Go to: https://github.com/settings/tokens
+# Scopes needed: 'repo' (full control of private repositories)
+
+# 2. Add to .env file
+GITHUB_TOKEN=ghp_your_token_here
+ICON_REPO_OWNER=icexuick          # Your GitHub username
+ICON_REPO_NAME=bar-unit-sync      # Your repo name
+ICON_BRANCH=main                   # Branch to commit to
+```
 
 **Usage:**
 ```bash
-# Sync with icons
+# Sync with icons (auto-commits to GitHub)
 python sync_units_github_to_webflow.py --sync-icons
 
-# Dry run with icons (see what would be uploaded)
+# Dry run to see what would be committed
 python sync_units_github_to_webflow.py --sync-icons --dry-run
 
 # Sync icons and publish
 python sync_units_github_to_webflow.py --sync-icons --publish
 ```
 
+**Output:**
+Icons are saved to `icons/` folder in your repository:
+```
+your-repo/
+├── icons/
+│   ├── armclaw.webp
+│   ├── armfast.webp
+│   └── armcom.webp
+├── sync_units_github_to_webflow.py
+└── README.md
+```
+
 **Requirements:**
-- Webflow API token with `assets:write` scope
-- Icon must exist in `icontypes.lua` for the unit
+- GitHub token with `repo` scope
+- Icon must exist in BAR's `icontypes.lua`
 - PNG file must be accessible in BAR repository
+
+### Troubleshooting Icon Sync
+
+**404 Error when committing to GitHub:**
+```
+❌ Error uploading to GitHub: 404 Client Error: Not Found
+```
+
+**Possible causes:**
+1. **Repository doesn't exist** - Check `ICON_REPO_OWNER` and `ICON_REPO_NAME` in `.env`
+2. **Wrong GitHub token** - Token must have `repo` scope (full control)
+3. **Private repo without access** - Make sure token has access to the repo
+
+**Fix:**
+```bash
+# 1. Verify your repo exists
+https://github.com/YOUR_USERNAME/YOUR_REPO_NAME
+
+# 2. Check .env settings
+ICON_REPO_OWNER=YOUR_GITHUB_USERNAME   # NOT organization name if personal repo
+ICON_REPO_NAME=YOUR_REPO_NAME
+ICON_BRANCH=main                        # or 'master' if that's your default
+
+# 3. Create new GitHub token with 'repo' scope
+# Go to: https://github.com/settings/tokens
+# Select: repo (Full control of private repositories)
+```
+
+**Icons not updating in Webflow:**
+- Icons are ALWAYS synced when `--sync-icons` is used, even if unit data hasn't changed
+- Check if icon URL appears in output: `URL: https://raw.githubusercontent.com/...`
+- Verify icon is visible in your repo at `https://github.com/YOUR_USERNAME/YOUR_REPO/tree/main/icons`
+- Raw URLs can take 5-10 minutes to be accessible after first commit
 
 ### Example Output
 
