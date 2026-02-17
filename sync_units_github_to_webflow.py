@@ -2009,6 +2009,21 @@ class UnitSyncService:
                 if bp_url:
                     webflow_fields['buildpic-in-game'] = bp_url
 
+            # ── Icon sync (when --sync-icons enabled) ─────────────────────────
+            if sync_icons and unit_name in icon_map and github_uploader:
+                current_icon_url = (
+                    webflow_lookup.get(unit_name, {}).get('fieldData', {}).get('icon')
+                    if not is_new_unit else None
+                )
+                icon_path = icon_map[unit_name]
+                print(f"  🎨 Syncing strategic icon...")
+                icon_url = self.sync_unit_icon(
+                    unit_name, icon_path, github_uploader,
+                    current_icon_url, dry_run
+                )
+                if icon_url:
+                    webflow_fields['icon'] = icon_url
+
             # ── New unit: skip change-detection, go straight to create ────────
             if is_new_unit:
                 print(f"  🆕 New unit — will be created as draft in Webflow")
@@ -2031,60 +2046,10 @@ class UnitSyncService:
                             changes[key] = {'old': current_value, 'new': new_value}
                     elif current_value != new_value:
                         changes[key] = {'old': current_value, 'new': new_value}
-            
-                # Sync icon if enabled (BEFORE checking for data changes)
-                icon_synced = False
-                if sync_icons and unit_name in icon_map and github_uploader:
-                    icon_path = icon_map[unit_name]
-                    current_icon_url = current_data.get('icon')
-                    
-                    print(f"  🎨 Syncing strategic icon...")
-                    asset_url = self.sync_unit_icon(
-                        unit_name, 
-                        icon_path, 
-                        github_uploader,
-                        current_icon_url,
-                        dry_run
-                    )
-                    
-                    if asset_url:
-                        # Check if icon URL changed
-                        if current_icon_url != asset_url:
-                            print(f"  📝 Icon URL changed")
-                            # Add icon to changes or update it separately
-                            if not changes:
-                                # No data changes, but icon changed - update only icon
-                                if not dry_run:
-                                    item_id = webflow_item['id']
-                                    icon_update = {
-                                        "icon": asset_url,
-                                        "name": current_data.get('name'),
-                                        "slug": current_data.get('slug')
-                                    }
-                                    if self.webflow.update_item(item_id, icon_update):
-                                        print(f"  ✅ Icon updated")
-                                        icon_synced = True
-                                        stats['updated'] += 1
-                                    else:
-                                        print(f"  ⚠️  Failed to link icon")
-                            else:
-                                # Will be updated together with data changes below
-                                changes['icon'] = {'old': current_icon_url, 'new': asset_url}
-                        else:
-                            print(f"  ✓ Icon already up-to-date")
                 
                 if not changes:
-                    if icon_synced:
-                        # Icon was updated, publish if requested
-                        if auto_publish and not dry_run:
-                            item_id = webflow_item['id']
-                            if self.webflow.publish_item(item_id):
-                                print(f"  📤 Published successfully")
-                            else:
-                                print(f"  ⚠️  Failed to publish")
-                    else:
-                        print(f"  ✓ Already up-to-date — no changes needed")
-                        stats['skipped'] += 1
+                    print(f"  ✓ Already up-to-date — no changes needed")
+                    stats['skipped'] += 1
                     print()
                     continue
             
