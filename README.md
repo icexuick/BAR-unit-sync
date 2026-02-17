@@ -1,6 +1,6 @@
 # Beyond All Reason — GitHub to Webflow Unit Sync 🔄
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: BAR Only](https://img.shields.io/badge/License-BAR%20Only-red.svg)](LICENSE)
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
 
 Automatically sync unit data from the [Beyond All Reason GitHub repository](https://github.com/beyond-all-reason/Beyond-All-Reason) to your Webflow CMS Units collection.
@@ -405,6 +405,9 @@ The script has a built-in rate limiter (110 requests/minute). If you still hit l
 
 ---
 
+
+---
+
 ## 🔒 Security
 
 - ⚠️ Never commit your `.env` file or API tokens to version control
@@ -416,7 +419,11 @@ The script has a built-in rate limiter (110 requests/minute). If you still hit l
 
 ## 📄 License
 
-MIT License — see [LICENSE](LICENSE) for details.
+**Custom License — Beyond All Reason Use Only**
+
+This software may only be used in connection with the Beyond All Reason (BAR) game project. You may use, modify, and deploy it for BAR-related purposes, but you may NOT use it for any other project, game, or commercial purpose.
+
+See [LICENSE](LICENSE) for full terms.
 
 ---
 
