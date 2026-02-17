@@ -531,6 +531,15 @@ class LuaParser:
                     if mine_match:
                         unit_data['_is_mine'] = True
 
+                    # Detect shield fields in customparams
+                    for shield_key in ('shield_power', 'shield_radius'):
+                        sm = re.search(rf'{shield_key}\s*=\s*([0-9.]+)', customparams_block, re.IGNORECASE)
+                        if sm:
+                            try:
+                                unit_data[shield_key] = float(sm.group(1))
+                            except ValueError:
+                                pass
+
             # Detect buildoptions block presence
             bo_match = re.search(r'buildoptions\s*=\s*\{', unit_block, re.IGNORECASE)
             if bo_match:
@@ -1301,6 +1310,61 @@ class UnitSyncService:
         # Mobile unit with unrecognised movementclass
         return "bot"
 
+    def detect_specials(self, unit_data: Dict) -> str:
+        """
+        Build a comma-separated string of special abilities for a unit.
+
+        Rules (all based on parsed unit_data fields):
+          Cloakable        — cloakcost > 0
+          Stealth          — stealth = true OR sonarstealth = true
+          Radar            — radardistance > 0
+          Sonar            — sonardistance > 0
+          Jammer           — radardistancejam > 0
+          Shield           — shield_power > 0 OR shield_radius > 0  (in customparams)
+          Resurrector      — canresurrect = true
+          Capturer         — cancapture = true
+          Transport        — transportsize > 0
+          Stealth Detector — seismicdistance > 0
+        """
+        specials = []
+
+        def _num(key):
+            try:
+                return float(unit_data.get(key, 0) or 0)
+            except (ValueError, TypeError):
+                return 0.0
+
+        def _bool(key):
+            v = unit_data.get(key)
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, str):
+                return v.lower() == 'true'
+            return False
+
+        if _num('cloakcost') > 0:
+            specials.append('Cloakable')
+        if _bool('stealth') or _bool('sonarstealth'):
+            specials.append('Stealth')
+        if _num('radardistance') > 0:
+            specials.append('Radar')
+        if _num('sonardistance') > 0:
+            specials.append('Sonar')
+        if _num('radardistancejam') > 0:
+            specials.append('Jammer')
+        if _num('shield_power') > 0 or _num('shield_radius') > 0:
+            specials.append('Shield')
+        if _bool('canresurrect'):
+            specials.append('Resurrector')
+        if _bool('cancapture'):
+            specials.append('Capturer')
+        if _num('transportsize') > 0:
+            specials.append('Transport')
+        if _num('seismicdistance') > 0:
+            specials.append('Stealth Detector')
+
+        return ', '.join(specials)
+
     def map_github_to_webflow_fields(self, github_data: Dict) -> Dict:
         """Map GitHub unit data to Webflow field structure."""
         webflow_fields = {}
@@ -1390,6 +1454,11 @@ class UnitSyncService:
             if unresolved:
                 # Store for display only — not sent to Webflow
                 github_data['_buildoptions_unresolved'] = unresolved
+
+        # Handle specials (comma-separated string of special abilities)
+        specials = self.detect_specials(github_data)
+        if specials:
+            webflow_fields['specials'] = specials
 
         return webflow_fields
     
@@ -1634,9 +1703,7 @@ class UnitSyncService:
                     in_buildable = "already in buildoptions" if uf['name'] in all_buildable else "not in buildoptions"
                     print(f"     ✅ {uf['name']}  ({in_buildable})")
             print(f"  Keeping {len(buildable_files)} units,"
-                  f" skipping {len(unbuildable_files)} unbuildable:")
-            for uf in sorted(unbuildable_files, key=lambda x: x['name']):
-                print(f"    ⏭️  {uf['name']}  (not in any buildoptions)")
+                  f" skipping {len(unbuildable_files)} unbuildable")
             unit_files = buildable_files
         else:
             print("  ⚠️  Could not determine buildable units — syncing all units")
@@ -1696,6 +1763,7 @@ class UnitSyncService:
             'dps':                 'DPS              ',
             'weaponrange':         'Weapon Range     ',
             'weapons':             'Weapons          ',
+            'specials':            'Specials         ',
             'metal-cost':          'Metal Cost       ',
             'energy-cost':         'Energy Cost      ',
             'build-cost':          'Build Cost       ',

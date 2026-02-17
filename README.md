@@ -1,46 +1,87 @@
-# Beyond All Reason - GitHub to Webflow Unit Sync 🔄
+# Beyond All Reason — GitHub to Webflow Unit Sync 🔄
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
 
 Automatically sync unit data from the [Beyond All Reason GitHub repository](https://github.com/beyond-all-reason/Beyond-All-Reason) to your Webflow CMS Units collection.
 
+---
+
 ## 🎯 Features
 
-- ✅ Automatically fetches all `.lua` unit files from GitHub
-- ✅ Parses unit definitions and extracts relevant data
-- ✅ Maps GitHub fields to Webflow CMS fields
-- ✅ Updates only fields that have changed
-- ✅ Supports dry-run mode to preview changes
+- ✅ Fetches all `.lua` unit files from the BAR GitHub repository
+- ✅ Only syncs **buildable units** (units that appear in any `buildoptions` list) + a whitelist for commanders
+- ✅ Parses unit definitions and extracts all relevant fields
+- ✅ Calculates **DPS** using BAR's official formula (damage × reload × salvo × burst × projectiles)
+- ✅ Detects **weapon types** and filters out bogus/zero-damage/unequipped weapons
+- ✅ Detects **special abilities** (Radar, Stealth, Shield, Transport, etc.)
+- ✅ Detects **faction** (Armada, Cortex, Legion, CHICKS) from unit filename prefix
+- ✅ Detects **unit type** (Aircraft, Bot, Vehicle, Ship, Hovercraft, Building, etc.)
+- ✅ Detects **amphibious** units using BAR's official `alldefs_post.lua` logic
+- ✅ Resolves **buildoptions** to Webflow item IDs (multi-reference field)
+- ✅ Syncs **unit names and tooltips** from `language/en/units.json`
+- ✅ Updates **only fields that have changed** — skips untouched units
+- ✅ Dry-run mode to preview changes without writing to Webflow
 - ✅ Optional auto-publishing of updated items
-- ✅ **Persistent cache** - stores unit file list locally for fast subsequent runs
-- ✅ **Strategic icon sync** - downloads PNG from GitHub, converts to WebP (80% quality), uploads to Webflow Assets
-- ✅ Detailed logging and progress reporting
-- ✅ Error handling and recovery
-- ✅ Recursive directory scanning
+- ✅ **Strategic icon sync** — PNG → WebP, committed to GitHub, linked in Webflow
+- ✅ Single-unit mode for testing (`--unit armzeus`)
+- ✅ Detailed console output with readable field names
 
-## 📊 Field Mapping
+---
 
-The following fields are synced from GitHub to Webflow:
+## 📊 Synced Fields
 
-| GitHub Field (lua) | Webflow Field | Description |
-|-------------------|---------------|-------------|
-| `energycost` | Energy Cost | Energy required to build |
-| `metalcost` | Metal Cost | Metal required to build |
-| `buildtime` | Build Cost | Time to build |
-| `energymake` | Energy Make | Energy production |
-| `workertime` | Buildpower | Construction power |
-| `health` | Health | Unit health points |
-| `speed` | Speed | Movement speed |
-| `sightdistance` | Sightrange | Vision range |
-| `radardistance` | Radarrange | Radar range |
-| `sonardistance` | Sonarrange | Sonar range |
-| `jammerdistance` | Jammerrange | Jammer range |
-| `mass` | Mass | Unit mass |
-| `cloakcost` | Cloak cost | Energy cost for cloaking |
-| `customparams.paralyzemultiplier` | Paralyze Multiplier | Paralyze damage multiplier |
+### Direct fields (from `.lua` unit file)
 
-**Note:** Weapon-related fields (Weapons, DPS, Weapon Range) are NOT synced and remain manually managed.
+| Lua field | Webflow slug | Type |
+|---|---|---|
+| `energycost` | `energy-cost` | Number |
+| `metalcost` | `metal-cost` | Number |
+| `buildtime` | `build-cost` | Number |
+| `energymake` | `energy-make` | Number |
+| `workertime` | `buildpower` | Number |
+| `health` | `health` | Number |
+| `maxvelocity` | `speed` | Number |
+| `sightdistance` | `sightrange` | Number |
+| `radardistance` | `radarrange` | Number |
+| `sonardistance` | `metal-make` | Number (Sonarrange) |
+| `jammerdistance` | `jammerrange` | Number |
+| `mass` | `mass` | Number |
+| `cloakcost` | `cloak-cost` | Number |
+| `customparams.paralyzemultiplier` | `paralyze-multiplier` | Number |
+| `customparams.techlevel` | `techlevel` | Number |
+
+### Derived / computed fields
+
+| Field | Webflow slug | Type | How it's computed |
+|---|---|---|---|
+| Unit display name | `unitname` | PlainText | From `language/en/units.json` |
+| Tooltip | `tooltip` | PlainText | From `language/en/units.json` |
+| Faction | `faction-ref` | Reference | Filename prefix: `arm` → Armada, `cor` → Cortex, `leg` → Legion, `raptor` → CHICKS |
+| Unit Type | `unittype` | Reference | Detected from `movementclass`, `canfly`, speed, builder flags |
+| Amphibious | `amphibious` | Switch | Based on BAR's `alldefs_post.lua` movement class lists |
+| Buildoptions | `buildoptions-ref` | MultiReference | Units this unit can build, resolved to Webflow item IDs |
+| DPS | `dps` | Number | `(max(dmg_vtol, dmg_default) × (1/reload)) × salvosize × burst × projectiles` |
+| Weapon Range | `weaponrange` | Number | Highest range across all equipped non-bogus weapons |
+| Weapons | `weapons` | PlainText | e.g. `LaserCannon, 2x MissileLauncher, EMP-BeamLaser` |
+| Specials | `specials` | PlainText | Comma-separated special abilities (see below) |
+
+### Specials detection
+
+| Special | Condition |
+|---|---|
+| Cloakable | `cloakcost > 0` |
+| Stealth | `stealth = true` OR `sonarstealth = true` |
+| Radar | `radardistance > 0` |
+| Sonar | `sonardistance > 0` |
+| Jammer | `radardistancejam > 0` |
+| Shield | `customparams.shield_power > 0` OR `customparams.shield_radius > 0` |
+| Resurrector | `canresurrect = true` |
+| Capturer | `cancapture = true` |
+| Transport | `transportsize > 0` |
+| Stealth Detector | `seismicdistance > 0` |
+
+---
 
 ## 🚀 Quick Start
 
@@ -52,7 +93,7 @@ The following fields are synced from GitHub to Webflow:
 
 ### Installation
 
-1. **Clone this repository:**
+1. **Download and unzip** this repository, or clone it:
    ```bash
    git clone https://github.com/your-username/bar-unit-sync.git
    cd bar-unit-sync
@@ -63,356 +104,243 @@ The following fields are synced from GitHub to Webflow:
    pip install -r requirements.txt
    ```
 
-3. **Configure your API token:**
+3. **Set your Webflow API token:**
    ```bash
-   cp .env.example .env
-   # Edit .env and add your Webflow API token
-   ```
-
-   Or set it as an environment variable:
-   ```bash
+   # Option A: environment variable
    export WEBFLOW_API_TOKEN="your-token-here"
+
+   # Option B: .env file
+   cp .env.example .env
+   # Edit .env and fill in your token
    ```
 
 ### Usage
 
-**Dry Run (recommended first time):**
+**Dry run — preview changes without writing anything (recommended first):**
 ```bash
 python sync_units_github_to_webflow.py --dry-run
 ```
 
-**Sync and Update:**
+**Test a single unit:**
+```bash
+python sync_units_github_to_webflow.py --unit armzeus --dry-run
+python sync_units_github_to_webflow.py --unit armzeus
+```
+
+**Full sync:**
 ```bash
 python sync_units_github_to_webflow.py
 ```
 
-**Sync and Auto-Publish:**
+**Full sync with auto-publish:**
 ```bash
 python sync_units_github_to_webflow.py --publish
 ```
 
-**Sync with Token:**
+**Sync including strategic icons:**
 ```bash
-python sync_units_github_to_webflow.py --token "your-webflow-token"
+python sync_units_github_to_webflow.py --sync-icons
 ```
 
-## 📖 Documentation
-
-### Command Line Options
-
-| Flag | Description |
-|------|-------------|
-| `--dry-run` | Preview changes without updating Webflow |
-| `--publish` | Automatically publish updated items |
-| `--sync-icons` | Also sync strategic icons (PNG → WebP, 80% quality) |
-| `--clear-cache` | Clear the unit file cache before syncing |
-| `--token TOKEN` | Provide Webflow API token via command line |
-| `--help` | Show help message |
-
-### Cache System
-
-The script uses a **persistent cache** (`.unit_cache.json`) to store the list of unit files from GitHub. This means:
-
-- **First run**: Fetches all unit files from GitHub (~30-60 seconds)
-- **Subsequent runs**: Loads from cache (<1 second) ⚡
-
-**When to clear cache:**
+**Clear cache and re-fetch everything from GitHub:**
 ```bash
-# Clear cache if new units were added to GitHub
-python sync_single_unit.py armfast --clear-cache
-
-# Or for full sync
 python sync_units_github_to_webflow.py --clear-cache
 ```
 
-The cache is automatically invalidated if you switch to a different repository or branch.
+---
 
-### Strategic Icon Sync
+## 📖 Command Line Reference
 
-The script can automatically sync strategic icons for units by **committing them to your GitHub repository**:
+| Flag | Description |
+|---|---|
+| `--dry-run` | Preview changes without updating Webflow |
+| `--unit NAME` | Sync only one specific unit, e.g. `--unit armzeus` |
+| `--publish` | Automatically publish updated items after sync |
+| `--sync-icons` | Also sync strategic icons (PNG → WebP, committed to GitHub) |
+| `--clear-cache` | Delete local cache files and re-fetch everything from GitHub |
+| `--token TOKEN` | Provide Webflow API token via command line |
+| `--help` | Show help message |
+
+---
+
+## 💾 Cache System
+
+The script uses two local cache files to avoid re-downloading data on every run.
+
+### `.unit_cache.json`
+Caches individual unit `.lua` file contents fetched from GitHub.
+- **First run**: downloads each file on demand
+- **Subsequent runs**: loads from cache instantly ⚡
+
+### `.buildable_cache.json`
+Built once by downloading the entire BAR repository as a ZIP archive and scanning all unit files. Stores two indexes:
+
+- `buildable` — set of all unit names that appear in any `buildoptions` list
+- `buildoptions_map` — maps each unit name to the list of units it can build
+
+> The script only syncs **buildable units** — those that appear in at least one factory's buildoptions. This filters out ~230 internal/unused units out of ~850 total. A small whitelist (commanders) is always included regardless.
+
+**When to clear cache:**
+```bash
+# After BAR updates that add new units or change buildoptions
+python sync_units_github_to_webflow.py --clear-cache
+```
+
+Cache is automatically invalidated if the repository or branch changes.
+
+---
+
+## 🔫 Weapon Parsing
+
+Weapons are read directly from the `weapondefs` and `weapons` blocks in each unit's `.lua` file. Only weapons listed in `weapons = { [1] = { def = "..." }, ... }` are processed — unused or backup definitions in `weapondefs` that are not assigned are ignored.
+
+**DPS formula** (mirrors BAR's in-game Lua scripts):
+```
+dps += (max(dmg_vtol, dmg_default) × (1 / reloadtime)) × salvosize × burst × projectiles
+```
+
+The formula uses `dmg_vtol` when it is higher than `dmg_default`, matching the game's own logic for anti-air optimised weapons.
+
+**A weapon is skipped entirely if:**
+- Its `name` field contains `bogus` or `mine`
+- Its `customparams` block contains `bogus = 1`
+- Both `dmg_default` and `dmg_vtol` are zero or absent
+
+**EMP / paralyzer weapons** (`paralyzer = true`) appear in the `weapons` field with an `EMP-` prefix (e.g. `EMP-BeamLaser`) but do **not** contribute to the DPS value.
+
+---
+
+## 🎨 Strategic Icon Sync
+
+When `--sync-icons` is used, unit icons are committed to your own GitHub repository as WebP files and linked from there in Webflow.
 
 **How it works:**
-1. Parses `icontypes.lua` from BAR repository to find icon paths
-2. Downloads PNG icons from BAR GitHub repo
-3. Converts PNG → WebP with 80% quality (preserves transparency)
-4. **Commits WebP files to your repo** (e.g., `icons/armclaw.webp`)
-5. Uses GitHub raw URL in Webflow (e.g., `https://raw.githubusercontent.com/icexuick/bar-unit-sync/main/icons/armclaw.webp`)
-6. Links URL to unit's `icon` field in Webflow CMS
+1. Parses `icontypes.lua` from the BAR repo to find each unit's icon path
+2. Downloads the PNG from the BAR GitHub repo
+3. Converts PNG → WebP at 80% quality (transparency preserved)
+4. Commits the WebP to your repo at `icons/<unitname>.webp`
+5. Sets the raw GitHub URL in Webflow's `icon` field
 
-**Benefits:**
-- ✅ **Fully public URLs** - no CORS issues
-- ✅ **Permanent links** - stable URLs for Webflow
-- ✅ **Version control** - track icon changes in Git history
-- ✅ **No external hosting** needed - GitHub hosts the images
-- ✅ **Easy updates** - script auto-commits on changes
-
-**Setup:**
-```bash
-# 1. Create GitHub Personal Access Token
-# Go to: https://github.com/settings/tokens
-# Scopes needed: 'repo' (full control of private repositories)
-
-# 2. Add to .env file
+**Add to `.env`:**
+```
 GITHUB_TOKEN=ghp_your_token_here
-ICON_REPO_OWNER=icexuick          # Your GitHub username
-ICON_REPO_NAME=bar-unit-sync      # Your repo name
-ICON_BRANCH=main                   # Branch to commit to
+ICON_REPO_OWNER=your-github-username
+ICON_REPO_NAME=bar-unit-sync
+ICON_BRANCH=main
 ```
 
-**Usage:**
-```bash
-# Sync with icons (auto-commits to GitHub)
-python sync_units_github_to_webflow.py --sync-icons
+> The GitHub token needs `repo` scope. Create one at [github.com/settings/tokens](https://github.com/settings/tokens).
 
-# Dry run to see what would be committed
-python sync_units_github_to_webflow.py --sync-icons --dry-run
-
-# Sync icons and publish
-python sync_units_github_to_webflow.py --sync-icons --publish
-```
-
-**Output:**
-Icons are saved to `icons/` folder in your repository:
-```
-your-repo/
-├── icons/
-│   ├── armclaw.webp
-│   ├── armfast.webp
-│   └── armcom.webp
-├── sync_units_github_to_webflow.py
-└── README.md
-```
-
-**Requirements:**
-- GitHub token with `repo` scope
-- Icon must exist in BAR's `icontypes.lua`
-- PNG file must be accessible in BAR repository
-
-### Troubleshooting Icon Sync
-
-**404 Error when committing to GitHub:**
-```
-❌ Error uploading to GitHub: 404 Client Error: Not Found
-```
-
-**Possible causes:**
-1. **Repository doesn't exist** - Check `ICON_REPO_OWNER` and `ICON_REPO_NAME` in `.env`
-2. **Wrong GitHub token** - Token must have `repo` scope (full control)
-3. **Private repo without access** - Make sure token has access to the repo
-
-**Fix:**
-```bash
-# 1. Verify your repo exists
-https://github.com/YOUR_USERNAME/YOUR_REPO_NAME
-
-# 2. Check .env settings
-ICON_REPO_OWNER=YOUR_GITHUB_USERNAME   # NOT organization name if personal repo
-ICON_REPO_NAME=YOUR_REPO_NAME
-ICON_BRANCH=main                        # or 'master' if that's your default
-
-# 3. Create new GitHub token with 'repo' scope
-# Go to: https://github.com/settings/tokens
-# Select: repo (Full control of private repositories)
-```
-
-**Icons not updating in Webflow:**
-- Icons are ALWAYS synced when `--sync-icons` is used, even if unit data hasn't changed
-- Check if icon URL appears in output: `URL: https://raw.githubusercontent.com/...`
-- Verify icon is visible in your repo at `https://github.com/YOUR_USERNAME/YOUR_REPO/tree/main/icons`
-- Raw URLs can take 5-10 minutes to be accessible after first commit
-
-### Example Output
-
-```
-================================================================================
-Beyond All Reason - Unit Data Sync
-================================================================================
-
-Step 1: Fetching unit files from GitHub...
-Found 347 unit files
-
-Step 2: Fetching items from Webflow...
-Found 285 items in Webflow
-
-Step 3: Processing units...
-
-Processing: armfast (units/ArmBots/T2/armfast.lua)
-  📝 Changes detected:
-     energy-cost: 4140 → 3800
-     metal-cost: 171 → 160
-  ✅ Updated successfully
-
-================================================================================
-Sync Summary
-================================================================================
-Total units processed: 285
-Updated: 47
-Skipped (no changes): 220
-Not found in Webflow: 15
-Errors: 3
-```
+---
 
 ## 🤖 Automation
 
-### GitHub Actions (Recommended)
+### GitHub Actions
 
-This repository includes a GitHub Actions workflow that automatically syncs units on a schedule.
-
-Create `.github/workflows/sync-to-webflow.yml`:
+Create `.github/workflows/sync.yml`:
 
 ```yaml
-name: Sync Units to Webflow
+name: Sync BAR Units to Webflow
 
 on:
   schedule:
-    # Run every day at 2 AM UTC
-    - cron: '0 2 * * *'
-  workflow_dispatch:  # Allow manual trigger
+    - cron: '0 3 * * *'   # every day at 03:00 UTC
+  workflow_dispatch:         # allow manual trigger
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-      
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-        
-    - name: Install dependencies
-      run: pip install -r requirements.txt
-        
-    - name: Run sync
-      env:
-        WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
-      run: python sync_units_github_to_webflow.py --publish
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - run: pip install -r requirements.txt
+
+      - name: Run sync
+        env:
+          WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
+        run: python sync_units_github_to_webflow.py --publish
 ```
 
-**Setup:**
-1. Go to your repository Settings → Secrets and variables → Actions
-2. Add a new secret: `WEBFLOW_API_TOKEN`
-3. Paste your Webflow API token
-4. The workflow will run automatically every day at 2 AM UTC
+Add `WEBFLOW_API_TOKEN` to **Settings → Secrets and variables → Actions** in your repository.
 
-### Cron Job (Linux/Mac)
+### Cron job (Linux / Mac)
 
 ```bash
-# Edit crontab
 crontab -e
 
-# Add this line (runs daily at 2 AM)
-0 2 * * * cd /path/to/bar-unit-sync && python3 sync_units_github_to_webflow.py --publish >> /var/log/bar-sync.log 2>&1
+# Add this line (runs daily at 03:00):
+0 3 * * * cd /path/to/bar-unit-sync && python3 sync_units_github_to_webflow.py --publish >> /var/log/bar-sync.log 2>&1
 ```
 
-### Windows Task Scheduler
-
-1. Open Task Scheduler
-2. Create Basic Task
-3. Set trigger: Daily at 2:00 AM
-4. Set action:
-   - Program: `python`
-   - Arguments: `sync_units_github_to_webflow.py --publish`
-   - Start in: `C:\path\to\bar-unit-sync`
-
-## 🧪 Testing
-
-Run the test script to verify everything works:
-
-```bash
-python test_sync.py
-```
-
-This will:
-- Test the Lua parsing logic
-- Verify field mapping
-- Test GitHub API fetching
-- Validate expected outputs
+---
 
 ## 🔧 Configuration
 
-Edit these constants in `sync_units_github_to_webflow.py` if needed:
+The main constants are near the top of `sync_units_github_to_webflow.py`:
 
 ```python
-GITHUB_REPO = "beyond-all-reason/Beyond-All-Reason"
-GITHUB_BRANCH = "master"
-GITHUB_UNITS_PATH = "units"
-WEBFLOW_SITE_ID = "5c68622246b367adf6f3041d"
+GITHUB_REPO           = "beyond-all-reason/Beyond-All-Reason"
+GITHUB_BRANCH         = "master"
+GITHUB_UNITS_PATH     = "units"
+WEBFLOW_SITE_ID       = "5c68622246b367adf6f3041d"
 WEBFLOW_COLLECTION_ID = "6564c6553676389f8ba45a9e"
 ```
 
-### Adding New Fields
-
-To sync additional fields, add them to the `FIELD_MAPPING` dictionary:
-
+**Whitelist** — units always synced even if not in any buildoptions:
 ```python
-FIELD_MAPPING = {
-    "energycost": "energy-cost",
-    "your_new_field": "your-webflow-slug",
+SYNC_WHITELIST = {"armcom", "corcom", "legcom"}
+```
+
+**Faction map** — maps filename prefix to Webflow reference item ID:
+```python
+FACTION_MAP = {
+    "arm":    {"name": "Armada", "id": "..."},
+    "cor":    {"name": "Cortex", "id": "..."},
+    "leg":    {"name": "Legion", "id": "..."},
+    "raptor": {"name": "CHICKS", "id": "..."},
 }
 ```
 
-**Important:** Make sure the field exists in your Webflow CMS collection first!
+---
 
 ## 🐛 Troubleshooting
 
-### "Error: Webflow API token required"
-Set the `WEBFLOW_API_TOKEN` environment variable or use `--token` flag.
+**"Error: Webflow API token required"**
+Set `WEBFLOW_API_TOKEN` as an environment variable or pass `--token your-token`.
 
-### "Unit 'xyz' not found in Webflow"
-The unit exists in GitHub but not in Webflow. Create it manually in Webflow first.
+**"Unit 'xyz' not found in Webflow"**
+The unit exists on GitHub but hasn't been created in Webflow yet. Add it to the CMS first — the sync only updates existing items.
 
-### "Failed to parse file"
-The Lua file structure might be different than expected. Check the file on GitHub.
+**"Field not described in schema: undefined"**
+A field slug in the script doesn't match what's in Webflow. Open the Webflow CMS collection settings and verify the slug for that field.
 
-### Rate Limits
-If processing many units hits API limits, consider:
-- Running less frequently
-- Processing in smaller batches
-- Contacting Webflow support for higher limits
+**"Archive download failed"**
+The buildable cache couldn't be built. Check your internet connection. Run `--clear-cache` to retry.
 
-## 📝 Adding Missing Fields to Webflow
+**Icons not appearing in Webflow**
+Raw GitHub URLs can take a few minutes to become accessible after the first commit. Check that the file exists at `https://github.com/YOUR_USERNAME/YOUR_REPO/tree/main/icons`.
 
-The following fields from the request are not yet in Webflow:
-- `mass` (Mass)
-- `paralyzemultiplier` (Paralyze Multiplier)  
-- `cloakcost` (Cloak Cost)
+**Rate limits**
+The script has a built-in rate limiter (110 requests/minute). If you still hit limits, reduce the request rate in the `RateLimiter` class or run the sync less frequently.
 
-To add these:
-1. Go to Webflow CMS → Units collection → Settings
-2. Add new fields with appropriate types (Number)
-3. Update `FIELD_MAPPING` in the script
-4. Run sync
+---
 
 ## 🔒 Security
 
-- ⚠️ Never commit your `.env` file or API tokens
-- ✅ Use environment variables or GitHub Secrets
+- ⚠️ Never commit your `.env` file or API tokens to version control
+- ✅ Use environment variables or GitHub Secrets for all tokens
 - ✅ Rotate API tokens periodically
-- ✅ The script only makes PATCH requests to update existing items
+- ✅ The script only makes `PATCH` requests — it never creates or deletes Webflow CMS items
+
+---
 
 ## 📄 License
 
-MIT License - see [LICENSE](LICENSE) file for details
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 📧 Support
-
-For issues or questions:
-- Open an issue in this repository
-- Check [Webflow API documentation](https://developers.webflow.com/)
-- Review [Beyond All Reason GitHub](https://github.com/beyond-all-reason/Beyond-All-Reason)
-
-## 🙏 Acknowledgments
-
-- Beyond All Reason development team
-- Webflow API documentation
-- Python community
+MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
