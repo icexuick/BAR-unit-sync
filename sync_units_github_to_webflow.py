@@ -436,8 +436,8 @@ class LuaParser:
             if not wd:
                 continue
 
-            # Skip bogus/mine weapons (by name or customparams.bogus = 1)
-            if 'bogus' in wd['def_name'] or 'mine' in wd['def_name'] or wd['is_bogus']:
+            # Skip weapons with 'bogus' or 'mine' in their name — always placeholders
+            if 'bogus' in wd['def_name'] or 'mine' in wd['def_name']:
                 continue
 
             wtype = wd['weapontype']
@@ -458,7 +458,7 @@ class LuaParser:
                 # Pick higher damage tier (vtol vs default) — mirrors Lua logic
                 dmg = wd['dmg_vtol'] if wd['dmg_vtol'] > wd['dmg_default'] else wd['dmg_default']
 
-                # Skip weapons with zero damage — don't count in list or DPS
+                # Skip if no damage (regardless of bogus flag)
                 if dmg <= 0:
                     continue
 
@@ -706,6 +706,34 @@ class WebflowAPI:
             if hasattr(e, 'response') and e.response is not None:
                 print(f"Response: {e.response.text}")
             return False
+
+    def create_item(self, field_data: Dict, is_draft: bool = True) -> Optional[str]:
+        """
+        Create a new item in the collection.
+        Returns the new item's ID on success, or None on failure.
+        Items are created as draft by default.
+        """
+        try:
+            self._rate_limit()
+
+            url = f"{self.base_url}/collections/{self.collection_id}/items"
+
+            payload = {
+                "fieldData": field_data,
+                "isDraft":   is_draft,
+            }
+
+            response = requests.post(url, headers=self.headers, json=payload)
+            response.raise_for_status()
+
+            data = response.json()
+            return data.get('id')
+
+        except Exception as e:
+            print(f"Error creating item: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"Response: {e.response.text}")
+            return None
     
     def publish_item(self, item_id: str) -> bool:
         """
@@ -1039,6 +1067,34 @@ class ImageConverter:
         except Exception as e:
             print(f"Error converting PNG to WebP: {e}")
             return None
+
+    @staticmethod
+    def dds_to_webp(dds_data: bytes, quality: int = 80) -> Optional[bytes]:
+        """
+        Convert DDS to WebP with specified quality.
+        Pillow 10+ supports reading DDS natively.
+
+        Args:
+            dds_data: DDS image as bytes
+            quality:  WebP quality (1-100), default 80
+
+        Returns:
+            WebP image as bytes, or None on failure
+        """
+        try:
+            img = Image.open(io.BytesIO(dds_data))
+
+            # DDS can come in various modes; normalise to RGBA for WebP
+            if img.mode not in ('RGB', 'RGBA'):
+                img = img.convert('RGBA')
+
+            output = io.BytesIO()
+            img.save(output, format='WEBP', quality=quality, method=6)
+            return output.getvalue()
+
+        except Exception as e:
+            print(f"Error converting DDS to WebP: {e}")
+            return None
     
     @staticmethod
     def generate_md5_hash(data: bytes) -> str:
@@ -1069,72 +1125,76 @@ class GitHubIconUploader:
             "Accept": "application/vnd.github.v3+json"
         }
         self.icons_dir = "icons"
-    
-    def upload_icon(self, file_data: bytes, filename: str) -> Optional[str]:
+        self.buildpics_dir = "buildpics"
+
+    def _upload_file(self, file_data: bytes, repo_path: str, commit_msg: str) -> Optional[str]:
         """
-        Upload icon to GitHub repository and return public raw URL.
-        
-        This commits the file directly to the repo, making it publicly accessible
-        via GitHub's raw content URL.
-        
-        Args:
-            file_data: WebP file as bytes
-            filename: Filename (e.g., "armclaw.webp")
-            
-        Returns:
-            Public raw GitHub URL if successful, None otherwise
+        Internal helper: commit a file to the GitHub repo and return its raw URL.
+        Creates or updates the file depending on whether it already exists.
         """
         try:
             import base64
-            
-            # Path in repo
-            file_path = f"{self.icons_dir}/{filename}"
-            
-            # Check if file already exists (to get SHA for update)
+
+            check_url = f"{self.base_url}/repos/{self.repo_owner}/{self.repo_name}/contents/{repo_path}"
+            params    = {"ref": self.branch}
+
             sha = None
-            check_url = f"{self.base_url}/repos/{self.repo_owner}/{self.repo_name}/contents/{file_path}"
-            params = {"ref": self.branch}
-            
             check_response = requests.get(check_url, headers=self.headers, params=params)
-            
             if check_response.status_code == 200:
-                existing = check_response.json()
-                sha = existing.get('sha')
+                sha = check_response.json().get('sha')
                 print(f"     File exists, updating...")
             elif check_response.status_code == 404:
                 print(f"     Creating new file...")
             else:
                 print(f"  ⚠️  Unexpected response checking file: {check_response.status_code}")
-            
-            # Encode file as base64
+
             content_base64 = base64.b64encode(file_data).decode('utf-8')
-            
-            # Create/update file via GitHub API
             payload = {
-                "message": f"🎨 Add/update strategic icon: {filename}",
+                "message": commit_msg,
                 "content": content_base64,
-                "branch": self.branch
+                "branch":  self.branch,
             }
-            
             if sha:
-                payload["sha"] = sha  # Required for updates
-            
+                payload["sha"] = sha
+
             response = requests.put(check_url, headers=self.headers, json=payload)
             response.raise_for_status()
-            
-            # Construct raw GitHub URL
-            raw_url = f"https://raw.githubusercontent.com/{self.repo_owner}/{self.repo_name}/{self.branch}/{file_path}"
-            
-            print(f"  ✅ Committed to GitHub: {filename}")
-            print(f"     URL: {raw_url}")
-            
+
+            raw_url = (
+                f"https://raw.githubusercontent.com/"
+                f"{self.repo_owner}/{self.repo_name}/{self.branch}/{repo_path}"
+            )
             return raw_url
-            
+
         except Exception as e:
             print(f"  ❌ Error uploading to GitHub: {e}")
             if hasattr(e, 'response') and e.response is not None:
                 print(f"     Response: {e.response.text}")
             return None
+    
+    def upload_icon(self, file_data: bytes, filename: str) -> Optional[str]:
+        """Upload strategic icon WebP to icons/ folder. Returns public raw URL."""
+        repo_path = f"{self.icons_dir}/{filename}"
+        url = self._upload_file(
+            file_data, repo_path,
+            commit_msg=f"🎨 Add/update strategic icon: {filename}"
+        )
+        if url:
+            print(f"  ✅ Committed to GitHub: {filename}")
+            print(f"     URL: {url}")
+        return url
+
+    def upload_buildpic(self, file_data: bytes, filename: str) -> Optional[str]:
+        """Upload buildpic WebP to buildpics/ folder. Returns public raw URL."""
+        repo_path = f"{self.buildpics_dir}/{filename}"
+        url = self._upload_file(
+            file_data, repo_path,
+            commit_msg=f"🖼️  Add/update buildpic: {filename}"
+        )
+        if url:
+            print(f"  ✅ Committed to GitHub: {filename}")
+            print(f"     URL: {url}")
+        return url
 
 
 class UnitSyncService:
@@ -1516,6 +1576,72 @@ class UnitSyncService:
             print(f"    ❌ Error syncing icon: {e}")
             return None
 
+    def sync_unit_buildpic(self, unit_name: str, dds_filename: str,
+                           github_uploader: GitHubIconUploader,
+                           current_buildpic_url: Optional[str] = None,
+                           dry_run: bool = False) -> Optional[str]:
+        """
+        Sync a unit's in-game buildpic.
+
+        Reads the DDS file from BAR's unitpics/ folder, converts it to WebP (80%
+        quality), commits it to the icon repo under buildpics/, and returns the
+        public raw GitHub URL.
+
+        Args:
+            unit_name:            Unit name (used for the output filename)
+            dds_filename:         Filename as found in buildpic field (e.g. "armflea.dds")
+            github_uploader:      GitHubIconUploader instance
+            current_buildpic_url: Current URL already stored in Webflow (skip if unchanged)
+            dry_run:              If True, don't actually upload
+
+        Returns:
+            Public GitHub raw URL on success, None on failure
+        """
+        try:
+            # BAR stores buildpics in unitpics/<n>.dds
+            # Strip path prefix, force lowercase (GitHub is case-sensitive)
+            dds_basename = dds_filename.split('/')[-1].split('\\')[-1].lower()
+            if not dds_basename.endswith('.dds'):
+                dds_basename += '.dds'
+            dds_path = f"unitpics/{dds_basename}"
+
+            dds_url = (
+                f"https://raw.githubusercontent.com/{GITHUB_REPO}"
+                f"/refs/heads/{GITHUB_BRANCH}/{dds_path}"
+            )
+
+            headers = {}
+            github_token = os.environ.get("GITHUB_TOKEN")
+            if github_token:
+                headers['Authorization'] = f'token {github_token}'
+
+            print(f"    📥 Downloading buildpic: {dds_path}")
+            response = requests.get(dds_url, headers=headers)
+            response.raise_for_status()
+            dds_data = response.content
+
+            # Convert DDS → WebP (80% quality)
+            print(f"    🔄 Converting DDS → WebP (80% quality)")
+            webp_data = ImageConverter.dds_to_webp(dds_data, quality=80)
+
+            if not webp_data:
+                print(f"    ❌ Failed to convert DDS image")
+                return None
+
+            webp_filename = f"{unit_name}.webp"
+
+            if dry_run:
+                print(f"    ℹ️  Would commit: buildpics/{webp_filename} ({len(webp_data):,} bytes)")
+                return "https://raw.githubusercontent.com/example/repo/main/buildpics/dry-run.webp"
+
+            print(f"    📤 Committing to GitHub: buildpics/{webp_filename}")
+            public_url = github_uploader.upload_buildpic(webp_data, webp_filename)
+            return public_url
+
+        except Exception as e:
+            print(f"    ❌ Error syncing buildpic: {e}")
+            return None
+
     def _build_buildable_set_from_archive(self) -> set:
         """
         Download the entire repository as a zip archive and scan all unit .lua
@@ -1639,39 +1765,37 @@ class UnitSyncService:
         self.language_data = LanguageParser.fetch_and_parse(GITHUB_REPO, GITHUB_BRANCH, github_token)
         print()
         
-        # Step 1: Fetch icontypes if icon sync enabled
+        # Step 1: Set up GitHub uploader (needed for buildpics + optional icon sync)
         icon_map = {}
         github_uploader = None
-        
+
+        icon_repo_owner = os.environ.get("ICON_REPO_OWNER", "icexuick")
+        icon_repo_name  = os.environ.get("ICON_REPO_NAME",  "bar-unit-sync")
+        icon_branch     = os.environ.get("ICON_BRANCH",     "main")
+
+        if github_token:
+            github_uploader = GitHubIconUploader(
+                icon_repo_owner, icon_repo_name, github_token, icon_branch
+            )
+            print(f"Step 1: GitHub uploader ready → {icon_repo_owner}/{icon_repo_name} (branch: {icon_branch})")
+        else:
+            print("Step 1: ⚠️  GITHUB_TOKEN not set — buildpic sync disabled")
+            print("   Set GITHUB_TOKEN in .env to enable buildpic and icon uploads")
+        print()
+
         if sync_icons:
             print("Step 1a: Fetching icontypes.lua for icon paths...")
-            github_token = os.environ.get("GITHUB_TOKEN")
-            
+
             if not github_token:
                 print("⚠️  GITHUB_TOKEN not found - icon sync requires GitHub token")
-                print("   Set GITHUB_TOKEN in .env file for icon uploads")
                 sync_icons = False
             else:
                 icontypes_content = IconTypesParser.fetch_icontypes(GITHUB_REPO, GITHUB_BRANCH, github_token)
-                
+
                 if icontypes_content:
                     icon_map = IconTypesParser.parse_icontypes(icontypes_content)
                     print(f"Found {len(icon_map)} unit icons in icontypes.lua")
-                    
-                    # Get repo info from environment or use defaults
-                    icon_repo_owner = os.environ.get("ICON_REPO_OWNER", "icexuick")
-                    icon_repo_name = os.environ.get("ICON_REPO_NAME", "bar-unit-sync")
-                    icon_branch = os.environ.get("ICON_BRANCH", "main")
-                    
                     print(f"Will commit icons to: {icon_repo_owner}/{icon_repo_name} (branch: {icon_branch})")
-                    
-                    # Initialize GitHub uploader
-                    github_uploader = GitHubIconUploader(
-                        icon_repo_owner,
-                        icon_repo_name,
-                        github_token,
-                        icon_branch
-                    )
                 else:
                     print("⚠️  Failed to fetch icontypes.lua - icon sync disabled")
                     sync_icons = False
@@ -1764,6 +1888,7 @@ class UnitSyncService:
             'weaponrange':         'Weapon Range     ',
             'weapons':             'Weapons          ',
             'specials':            'Specials         ',
+            'buildpic-in-game':    'BuildPic In-game ',
             'metal-cost':          'Metal Cost       ',
             'energy-cost':         'Energy Cost      ',
             'build-cost':          'Build Cost       ',
@@ -1782,10 +1907,10 @@ class UnitSyncService:
         
         stats = {
             'processed': 0,
-            'updated': 0,
-            'skipped': 0,
-            'errors': 0,
-            'not_found': 0
+            'updated':   0,
+            'created':   0,
+            'skipped':   0,
+            'errors':    0,
         }
         
         for unit_file in unit_files:
@@ -1794,12 +1919,7 @@ class UnitSyncService:
             
             print(f"Processing: {unit_name} ({file_path})")
             
-            # Check if unit exists in Webflow
-            if unit_name not in webflow_lookup:
-                print(f"  ⏭️  Not in Webflow CMS — skipping (unit may not have been imported yet)")
-                stats['not_found'] += 1
-                print()
-                continue
+            is_new_unit = unit_name not in webflow_lookup
             
             # Fetch unit data from GitHub
             lua_content = self.github.fetch_unit_data(file_path)
@@ -1873,124 +1993,167 @@ class UnitSyncService:
                 else:
                     print(f"     {label}: —")
             print()
-            
-            # Get current Webflow data
-            webflow_item = webflow_lookup[unit_name]
-            current_data = webflow_item.get('fieldData', {})
-            
-            # Check what's changed
-            changes = {}
-            for key, new_value in webflow_fields.items():
-                current_value = current_data.get(key)
-                # For multi-reference fields (lists), compare sorted to ignore order
-                if isinstance(new_value, list) or isinstance(current_value, list):
-                    old_sorted = sorted(current_value) if isinstance(current_value, list) else []
-                    new_sorted = sorted(new_value)     if isinstance(new_value, list)     else []
-                    if old_sorted != new_sorted:
-                        changes[key] = {'old': current_value, 'new': new_value}
-                elif current_value != new_value:
-                    changes[key] = {'old': current_value, 'new': new_value}
-            
-            # Sync icon if enabled (BEFORE checking for data changes)
-            icon_synced = False
-            if sync_icons and unit_name in icon_map and github_uploader:
-                icon_path = icon_map[unit_name]
-                current_icon_url = current_data.get('icon')
-                
-                print(f"  🎨 Syncing strategic icon...")
-                asset_url = self.sync_unit_icon(
-                    unit_name, 
-                    icon_path, 
-                    github_uploader,
-                    current_icon_url,
-                    dry_run
+
+            # ── Buildpic sync (always, for both new and existing units) ───────
+            dds_filename = github_data.get('buildpic', '')
+            if dds_filename and github_uploader:
+                current_bp_url = (
+                    webflow_lookup.get(unit_name, {}).get('fieldData', {}).get('buildpic-in-game')
+                    if not is_new_unit else None
                 )
-                
-                if asset_url:
-                    # Check if icon URL changed
-                    if current_icon_url != asset_url:
-                        print(f"  📝 Icon URL changed")
-                        # Add icon to changes or update it separately
-                        if not changes:
-                            # No data changes, but icon changed - update only icon
-                            if not dry_run:
-                                item_id = webflow_item['id']
-                                icon_update = {
-                                    "icon": asset_url,
-                                    "name": current_data.get('name'),
-                                    "slug": current_data.get('slug')
-                                }
-                                if self.webflow.update_item(item_id, icon_update):
-                                    print(f"  ✅ Icon updated")
-                                    icon_synced = True
-                                    stats['updated'] += 1
-                                else:
-                                    print(f"  ⚠️  Failed to link icon")
-                        else:
-                            # Will be updated together with data changes below
-                            changes['icon'] = {'old': current_icon_url, 'new': asset_url}
-                    else:
-                        print(f"  ✓ Icon already up-to-date")
+                print(f"  🖼️  Syncing buildpic ({dds_filename})...")
+                bp_url = self.sync_unit_buildpic(
+                    unit_name, dds_filename, github_uploader,
+                    current_bp_url, dry_run
+                )
+                if bp_url:
+                    webflow_fields['buildpic-in-game'] = bp_url
+
+            # ── New unit: skip change-detection, go straight to create ────────
+            if is_new_unit:
+                print(f"  🆕 New unit — will be created as draft in Webflow")
+            else:
+                # ── Existing unit: detect what changed ─────────────────────────
+                # Get current Webflow data
+                webflow_item = webflow_lookup[unit_name]
+                current_data = webflow_item.get('fieldData', {})
             
-            if not changes:
-                if icon_synced:
-                    # Icon was updated, publish if requested
-                    if auto_publish and not dry_run:
-                        item_id = webflow_item['id']
+            # Check what's changed (only for existing units)
+            changes = {}
+            if not is_new_unit:
+                for key, new_value in webflow_fields.items():
+                    current_value = current_data.get(key)
+                    # For multi-reference fields (lists), compare sorted to ignore order
+                    if isinstance(new_value, list) or isinstance(current_value, list):
+                        old_sorted = sorted(current_value) if isinstance(current_value, list) else []
+                        new_sorted = sorted(new_value)     if isinstance(new_value, list)     else []
+                        if old_sorted != new_sorted:
+                            changes[key] = {'old': current_value, 'new': new_value}
+                    elif current_value != new_value:
+                        changes[key] = {'old': current_value, 'new': new_value}
+            
+                # Sync icon if enabled (BEFORE checking for data changes)
+                icon_synced = False
+                if sync_icons and unit_name in icon_map and github_uploader:
+                    icon_path = icon_map[unit_name]
+                    current_icon_url = current_data.get('icon')
+                    
+                    print(f"  🎨 Syncing strategic icon...")
+                    asset_url = self.sync_unit_icon(
+                        unit_name, 
+                        icon_path, 
+                        github_uploader,
+                        current_icon_url,
+                        dry_run
+                    )
+                    
+                    if asset_url:
+                        # Check if icon URL changed
+                        if current_icon_url != asset_url:
+                            print(f"  📝 Icon URL changed")
+                            # Add icon to changes or update it separately
+                            if not changes:
+                                # No data changes, but icon changed - update only icon
+                                if not dry_run:
+                                    item_id = webflow_item['id']
+                                    icon_update = {
+                                        "icon": asset_url,
+                                        "name": current_data.get('name'),
+                                        "slug": current_data.get('slug')
+                                    }
+                                    if self.webflow.update_item(item_id, icon_update):
+                                        print(f"  ✅ Icon updated")
+                                        icon_synced = True
+                                        stats['updated'] += 1
+                                    else:
+                                        print(f"  ⚠️  Failed to link icon")
+                            else:
+                                # Will be updated together with data changes below
+                                changes['icon'] = {'old': current_icon_url, 'new': asset_url}
+                        else:
+                            print(f"  ✓ Icon already up-to-date")
+                
+                if not changes:
+                    if icon_synced:
+                        # Icon was updated, publish if requested
+                        if auto_publish and not dry_run:
+                            item_id = webflow_item['id']
+                            if self.webflow.publish_item(item_id):
+                                print(f"  📤 Published successfully")
+                            else:
+                                print(f"  ⚠️  Failed to publish")
+                    else:
+                        print(f"  ✓ Already up-to-date — no changes needed")
+                        stats['skipped'] += 1
+                    print()
+                    continue
+            
+            # Show changes with readable labels (existing units only)
+            if not is_new_unit and changes:
+                print(f"  🔄 Changes detected ({len(changes)} field(s)):")
+                for key, change in changes.items():
+                    label = FIELD_LABELS.get(key, key)
+                    old_val = change['old'] if change['old'] is not None else '—'
+                    new_val = change['new'] if change['new'] is not None else '—'
+                    if key == 'faction-ref':
+                        old_val = next((f['name'] for f in FACTION_MAP.values() if f['id'] == old_val), old_val)
+                        new_val = next((f['name'] for f in FACTION_MAP.values() if f['id'] == new_val), new_val)
+                    elif key == 'unittype':
+                        old_val = next((t['name'] for t in UNIT_TYPE_MAP.values() if t['id'] == old_val), old_val)
+                        new_val = next((t['name'] for t in UNIT_TYPE_MAP.values() if t['id'] == new_val), new_val)
+                    elif key == 'buildoptions-ref':
+                        id_to_name = {v: k for k, v in self._webflow_id_map.items()}
+                        if isinstance(old_val, list):
+                            old_val = f"[{', '.join(id_to_name.get(i, i) for i in old_val)}] ({len(old_val)})"
+                        if isinstance(new_val, list):
+                            new_val = f"[{', '.join(id_to_name.get(i, i) for i in new_val)}] ({len(new_val)})"
+                    print(f"     {label}: {old_val}  →  {new_val}")
+            
+            # Update in Webflow (unless dry run)
+            if dry_run:
+                if is_new_unit:
+                    print(f"  🔍 DRY RUN — would create as draft in Webflow")
+                else:
+                    print(f"  🔍 DRY RUN — no changes written to Webflow")
+                stats['skipped'] += 1
+                print()
+                continue
+
+            if is_new_unit:
+                # ── CREATE new item as draft ──────────────────────────────────
+                # name and slug are required by Webflow
+                webflow_fields['name'] = unit_name
+                webflow_fields['slug'] = unit_name
+
+                new_id = self.webflow.create_item(webflow_fields, is_draft=True)
+                if new_id:
+                    print(f"  ✅ Created as draft (id: {new_id})")
+                    stats['created'] += 1
+                    # Add to webflow_lookup + id_map so buildoptions of later
+                    # units in this same run can resolve this new item
+                    self._webflow_id_map[unit_name] = new_id
+                    webflow_lookup[unit_name] = {'id': new_id, 'fieldData': webflow_fields}
+                else:
+                    print(f"  ❌ Create failed")
+                    stats['errors'] += 1
+            else:
+                # ── UPDATE existing item ──────────────────────────────────────
+                item_id = webflow_item['id']
+                success = self.webflow.update_item(item_id, webflow_fields)
+
+                if success:
+                    print(f"  ✅ Updated successfully")
+                    stats['updated'] += 1
+
+                    # Publish if requested
+                    if auto_publish:
                         if self.webflow.publish_item(item_id):
                             print(f"  📤 Published successfully")
                         else:
                             print(f"  ⚠️  Failed to publish")
                 else:
-                    print(f"  ✓ Already up-to-date — no changes needed")
-                    stats['skipped'] += 1
-                print()
-                continue
-            
-            # Show changes with readable labels
-            print(f"  🔄 Changes detected ({len(changes)} field(s)):")
-            for key, change in changes.items():
-                label = FIELD_LABELS.get(key, key)
-                old_val = change['old'] if change['old'] is not None else '—'
-                new_val = change['new'] if change['new'] is not None else '—'
-                if key == 'faction-ref':
-                    old_val = next((f['name'] for f in FACTION_MAP.values() if f['id'] == old_val), old_val)
-                    new_val = next((f['name'] for f in FACTION_MAP.values() if f['id'] == new_val), new_val)
-                elif key == 'unittype':
-                    old_val = next((t['name'] for t in UNIT_TYPE_MAP.values() if t['id'] == old_val), old_val)
-                    new_val = next((t['name'] for t in UNIT_TYPE_MAP.values() if t['id'] == new_val), new_val)
-                elif key == 'buildoptions-ref':
-                    id_to_name = {v: k for k, v in self._webflow_id_map.items()}
-                    if isinstance(old_val, list):
-                        old_val = f"[{', '.join(id_to_name.get(i, i) for i in old_val)}] ({len(old_val)})"
-                    if isinstance(new_val, list):
-                        new_val = f"[{', '.join(id_to_name.get(i, i) for i in new_val)}] ({len(new_val)})"
-                print(f"     {label}: {old_val}  →  {new_val}")
-            
-            # Update in Webflow (unless dry run)
-            if dry_run:
-                print(f"  🔍 DRY RUN — no changes written to Webflow")
-                stats['skipped'] += 1
-                print()
-                continue
-
-            # Apply changes to Webflow
-            item_id = webflow_item['id']
-            success = self.webflow.update_item(item_id, webflow_fields)
-
-            if success:
-                print(f"  ✅ Updated successfully")
-                stats['updated'] += 1
-
-                # Publish if requested
-                if auto_publish:
-                    if self.webflow.publish_item(item_id):
-                        print(f"  📤 Published successfully")
-                    else:
-                        print(f"  ⚠️  Failed to publish")
-            else:
-                print(f"  ❌ Update failed")
-                stats['errors'] += 1
+                    print(f"  ❌ Update failed")
+                    stats['errors'] += 1
 
             stats['processed'] += 1
             print()
@@ -1999,11 +2162,11 @@ class UnitSyncService:
         print("=" * 80)
         print("Sync Summary")
         print("=" * 80)
-        print(f"Total units processed: {stats['processed']}")
-        print(f"Updated: {stats['updated']}")
-        print(f"Skipped (no changes): {stats['skipped']}")
-        print(f"Not found in Webflow: {stats['not_found']}")
-        print(f"Errors: {stats['errors']}")
+        print(f"Total units processed : {stats['processed']}")
+        print(f"Created (draft)       : {stats['created']}")
+        print(f"Updated               : {stats['updated']}")
+        print(f"Skipped (no changes)  : {stats['skipped']}")
+        print(f"Errors                : {stats['errors']}")
         print()
         
         if dry_run:
