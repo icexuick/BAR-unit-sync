@@ -100,6 +100,7 @@ FIELD_MAPPING = {
     "jammerdistance": "jammerrange",
     "mass": "mass",
     "cloakcost": "cloak-cost",
+    "cloakcostmoving": "cloak-cost-moving",
     # Special fields handled separately:
     # - paralyzemultiplier (in customparams)
     # - techlevel (in customparams)
@@ -1902,6 +1903,7 @@ class UnitSyncService:
             'energy-make':         'Energy Make      ',
             'buildpower':          'Build Power      ',
             'cloak-cost':          'Cloak Cost       ',
+            'cloak-cost-moving':   'Cloak Cost Moving',
             'paralyze-multiplier': 'Paralyze Mult    ',
         }
         

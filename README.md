@@ -50,6 +50,7 @@ Automatically sync unit data from the [Beyond All Reason GitHub repository](http
 | `jammerdistance` | `jammerrange` | Number |
 | `mass` | `mass` | Number |
 | `cloakcost` | `cloak-cost` | Number |
+| `cloakcostmoving` | `cloak-cost-moving` | Number |
 | `customparams.paralyzemultiplier` | `paralyze-multiplier` | Number |
 | `customparams.techlevel` | `techlevel` | Number |
 
