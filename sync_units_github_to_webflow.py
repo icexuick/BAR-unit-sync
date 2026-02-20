@@ -100,6 +100,7 @@ FIELD_MAPPING = {
     "jammerdistance": "jammerrange",
     "mass": "mass",
     "cloakcost": "cloak-cost",
+    "cloakcostmoving": "cloak-cost-moving",
     # Special fields handled separately:
     # - paralyzemultiplier (in customparams)
     # - techlevel (in customparams)
@@ -391,26 +392,35 @@ class LuaParser:
 
             is_paralyzer = bool(re.search(r'\bparalyzer\s*=\s*true', wblock, re.IGNORECASE))
 
-            # Check customparams { bogus = 1 } inside this weapondef
+            # Check customparams { bogus = 1, stockpilelimit = X } inside this weapondef
             is_bogus_cp = False
+            stockpile_limit = None
             wcp_match = re.search(r'\bcustomparams\s*=\s*\{', wblock, re.IGNORECASE)
             if wcp_match:
                 wcp_block = LuaParser.extract_balanced_braces(wblock, wcp_match.end() - 1)
-                if wcp_block and re.search(r'\bbogus\s*=\s*1', wcp_block, re.IGNORECASE):
-                    is_bogus_cp = True
+                if wcp_block:
+                    if re.search(r'\bbogus\s*=\s*1', wcp_block, re.IGNORECASE):
+                        is_bogus_cp = True
+                    # Extract stockpilelimit
+                    sl_match = re.search(r'\bstockpilelimit\s*=\s*([0-9]+)', wcp_block, re.IGNORECASE)
+                    if sl_match:
+                        stockpile_limit = int(sl_match.group(1))
 
             weapondefs[wname.upper()] = {
-                'def_name':   (_val(wblock, 'name') or '').lower(),
-                'weapontype': _val(wblock, 'weapontype') or '',
-                'reloadtime': _val(wblock, 'reloadtime', float) or 1.0,
-                'salvosize':  _val(wblock, 'salvosize',  int)   or 1,
-                'burst':      _val(wblock, 'burst',      int)   or 1,
-                'projectiles':_val(wblock, 'projectiles',int)   or 1,
-                'range':      _val(wblock, 'range',      float) or 0.0,
-                'paralyzer':  is_paralyzer,
-                'is_bogus':   is_bogus_cp,
-                'dmg_default':dmg_default,
-                'dmg_vtol':   dmg_vtol,
+                'def_name':      (_val(wblock, 'name') or '').lower(),
+                'weapontype':    _val(wblock, 'weapontype') or '',
+                'reloadtime':    _val(wblock, 'reloadtime', float) or 1.0,
+                'salvosize':     _val(wblock, 'salvosize',  int)   or 1,
+                'burst':         _val(wblock, 'burst',      int)   or 1,
+                'projectiles':   _val(wblock, 'projectiles',int)   or 1,
+                'range':         _val(wblock, 'range',      float) or 0.0,
+                'paralyzer':     is_paralyzer,
+                'is_bogus':      is_bogus_cp,
+                'stockpile_limit': stockpile_limit,
+                'impulsefactor': _val(wblock, 'impulsefactor', float) or 0.0,
+                'areaofeffect':  _val(wblock, 'areaofeffect',  float) or 0.0,
+                'dmg_default':   dmg_default,
+                'dmg_vtol':      dmg_vtol,
             }
 
         # ── Step 2: parse weapons = { } to find which weapondefs are used ─────
@@ -430,6 +440,9 @@ class LuaParser:
         dps          = 0.0
         weapon_range = 0.0
         weapon_table: Dict[str, int] = {}
+        stockpile_limit = None  # Track highest stockpile limit found
+        max_impulsefactor = 0.0  # Track highest impulsefactor (only from weapons with damage)
+        max_areaofeffect = 0.0   # Track highest areaofeffect (only from weapons with damage)
 
         for def_key in used_defs:
             wd = weapondefs.get(def_key)
@@ -440,46 +453,59 @@ class LuaParser:
             if 'bogus' in wd['def_name'] or 'mine' in wd['def_name']:
                 continue
 
+            # Track stockpile limit (typically only one weapon has this)
+            if wd['stockpile_limit'] is not None:
+                if stockpile_limit is None or wd['stockpile_limit'] > stockpile_limit:
+                    stockpile_limit = wd['stockpile_limit']
+
             wtype = wd['weapontype']
 
+            # Pick higher damage tier (vtol vs default) — mirrors Lua logic
+            dmg = wd['dmg_vtol'] if wd['dmg_vtol'] > wd['dmg_default'] else wd['dmg_default']
+
+            # Skip if no damage (regardless of paralyzer or bogus flag)
+            if dmg <= 0:
+                continue
+
+            # Calculate DPS for ALL weapons (including paralyzers)
+            reload = wd['reloadtime'] or 1.0
+            dps += (dmg * (1.0 / reload)) * wd['salvosize'] * wd['burst'] * wd['projectiles']
+            result['has_damage'] = True
+
+            # Track max range
+            if wd['range'] > weapon_range:
+                weapon_range = wd['range']
+            
+            # Track max impulsefactor (only from weapons with damage > 0)
+            if wd['impulsefactor'] > max_impulsefactor:
+                max_impulsefactor = wd['impulsefactor']
+            
+            # Track max areaofeffect (only from weapons with damage > 0)
+            if wd['areaofeffect'] > max_areaofeffect:
+                max_areaofeffect = wd['areaofeffect']
+
+            # Add EMP prefix to paralyzer weapons in the weapon list
             if wd['paralyzer']:
-                # EMP — contributes to weapon list but not DPS
                 emp_map = {
                     'BeamLaser':          'EMP-BeamLaser',
                     'AircraftBomb':       'EMP-AircraftBomb',
                     'StarburstLauncher':  'EMP-StarburstLauncher',
                 }
                 wtype = emp_map.get(wtype, f'EMP-{wtype}')
-                # Track range for paralyzer weapons too
-                if wd['range'] > weapon_range:
-                    weapon_range = wd['range']
-                weapon_table[wtype] = weapon_table.get(wtype, 0) + 1
-            else:
-                # Pick higher damage tier (vtol vs default) — mirrors Lua logic
-                dmg = wd['dmg_vtol'] if wd['dmg_vtol'] > wd['dmg_default'] else wd['dmg_default']
 
-                # Skip if no damage (regardless of bogus flag)
-                if dmg <= 0:
-                    continue
-
-                reload = wd['reloadtime'] or 1.0
-                dps += (dmg * (1.0 / reload)) * wd['salvosize'] * wd['burst'] * wd['projectiles']
-                result['has_damage'] = True
-
-                # Track max range
-                if wd['range'] > weapon_range:
-                    weapon_range = wd['range']
-
-                weapon_table[wtype] = weapon_table.get(wtype, 0) + 1
+            weapon_table[wtype] = weapon_table.get(wtype, 0) + 1
 
         # ── Step 4: build weapons text ────────────────────────────────────────
         parts = []
         for wname, count in weapon_table.items():
             parts.append(f"{count}x {wname}" if count > 1 else wname)
 
-        result['dps']          = round(dps)
-        result['weaponrange']  = round(weapon_range)
-        result['weapons_text'] = ", ".join(parts)
+        result['dps']             = round(dps)
+        result['weaponrange']     = round(weapon_range)
+        result['weapons_text']    = ", ".join(parts)
+        result['stockpile_limit'] = stockpile_limit  # None if no weapon has it
+        result['max_impulsefactor'] = round(max_impulsefactor, 2) if max_impulsefactor > 0 else None
+        result['max_areaofeffect']  = round(max_areaofeffect) if max_areaofeffect > 0 else None
 
         return result
 
@@ -548,14 +574,17 @@ class LuaParser:
                 if bo_block and re.search(r'"(\w+)"', bo_block):
                     unit_data['_has_buildoptions'] = True
 
-            # Parse weapons: DPS, range, weapon type list
+            # Parse weapons: DPS, range, weapon type list, stockpile limit, impulse, aoe
             weapon_result = LuaParser.parse_weapons(unit_block)
             unit_data['_has_weapondefs'] = weapon_result['has_weapondefs']
             unit_data['_has_damage']     = weapon_result['has_damage']
             if weapon_result['has_weapondefs']:
-                unit_data['_dps']          = weapon_result['dps']
-                unit_data['_weaponrange']  = weapon_result['weaponrange']
-                unit_data['_weapons_text'] = weapon_result['weapons_text']
+                unit_data['_dps']              = weapon_result['dps']
+                unit_data['_weaponrange']      = weapon_result['weaponrange']
+                unit_data['_weapons_text']     = weapon_result['weapons_text']
+                unit_data['_stockpile_limit']  = weapon_result['stockpile_limit']
+                unit_data['_max_impulsefactor'] = weapon_result['max_impulsefactor']
+                unit_data['_max_areaofeffect'] = weapon_result['max_areaofeffect']
             
             # Extract key-value pairs (excluding nested tables like customparams)
             # Pattern for simple key = value pairs (not followed by {)
@@ -768,6 +797,33 @@ class WebflowAPI:
                 print(f"Response: {e.response.text}")
             return False
 
+    def unpublish_item(self, item_id: str) -> bool:
+        """
+        Unpublish a single CMS item using Webflow's V2 API.
+        Archives the item to fully remove it from the published site.
+        (Using isDraft only creates 'changes in draft', isArchived fully unpublishes)
+        """
+        try:
+            self._rate_limit()  # Rate limiting
+            
+            url = f"{self.base_url}/collections/{self.collection_id}/items/{item_id}"
+            
+            # Use isArchived to fully unpublish (not just "changes in draft")
+            payload = {
+                "isArchived": True
+            }
+            
+            response = requests.patch(url, headers=self.headers, json=payload)
+            response.raise_for_status()
+            
+            return True
+            
+        except Exception as e:
+            print(f"  ⚠️  Error archiving item {item_id}: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"     Response: {e.response.text}")
+            return False
+
 
 class IconTypesParser:
     """Parses icontypes.lua to get icon paths for units."""
@@ -857,6 +913,101 @@ class IconTypesParser:
                 if depth == 0:
                     return text[start:i]
         return None
+
+
+class MoveDefsParser:
+    """Parses movedefs.lua to detect all-terrain movement classes."""
+    
+    _cache = None  # Cache parsed data
+    
+    @staticmethod
+    def fetch_movedefs(repo: str, branch: str, github_token: Optional[str] = None) -> Optional[str]:
+        """Fetch movedefs.lua from GitHub."""
+        try:
+            url = f"https://raw.githubusercontent.com/{repo}/refs/heads/{branch}/gamedata/movedefs.lua"
+            headers = {}
+            if github_token:
+                headers['Authorization'] = f'token {github_token}'
+            
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            return response.text
+        except Exception as e:
+            print(f"Warning: Could not fetch movedefs.lua: {e}")
+            return None
+    
+    @staticmethod
+    def parse_allterrain_classes(content: str) -> set:
+        """
+        Parse movedefs.lua and find all-terrain movement classes.
+        
+        All-terrain = movedef has no maxslope OR maxslope = SLOPE.MAXIMUM
+        
+        Returns set of uppercase movement class names.
+        """
+        allterrain = set()
+        
+        try:
+            # Find the Spring.moveCtrl.loadMoveCtrlDefs block
+            block_match = re.search(r'Spring\.moveCtrl\.loadMoveCtrlDefs\s*\(\s*\{', content)
+            if not block_match:
+                return allterrain
+            
+            movedefs_block = LuaParser.extract_balanced_braces(content, block_match.end() - 1)
+            if not movedefs_block:
+                return allterrain
+            
+            # Find each movedef: CLASSNAME = { ... }
+            for movedef_match in re.finditer(r'(\w+)\s*=\s*\{', movedefs_block):
+                class_name = movedef_match.group(1).upper()
+                movedef_block = LuaParser.extract_balanced_braces(movedefs_block, movedef_match.end() - 1)
+                
+                if not movedef_block:
+                    continue
+                
+                # Check if maxslope is absent or = SLOPE.MAXIMUM
+                maxslope_match = re.search(r'maxslope\s*=\s*([^\n,]+)', movedef_block, re.IGNORECASE)
+                
+                if not maxslope_match:
+                    # No maxslope = all-terrain
+                    allterrain.add(class_name)
+                else:
+                    # Check if maxslope = SLOPE.MAXIMUM (or variants)
+                    maxslope_value = maxslope_match.group(1).strip().rstrip(',')
+                    if 'SLOPE.MAXIMUM' in maxslope_value.upper() or 'SLOPE_MAXIMUM' in maxslope_value.upper():
+                        allterrain.add(class_name)
+            
+            return allterrain
+            
+        except Exception as e:
+            print(f"Warning: Error parsing movedefs.lua: {e}")
+            return allterrain
+    
+    @classmethod
+    def get_allterrain_classes(cls, repo: str, branch: str, github_token: Optional[str] = None) -> set:
+        """
+        Get all-terrain movement classes from movedefs.lua.
+        Uses cache to avoid repeated fetches.
+        """
+        if cls._cache is not None:
+            return cls._cache
+        
+        content = cls.fetch_movedefs(repo, branch, github_token)
+        
+        if content:
+            cls._cache = cls.parse_allterrain_classes(content)
+            
+            if cls._cache:
+                print(f"  📖 Loaded {len(cls._cache)} all-terrain movement classes from movedefs.lua")
+                # Show first few for debugging
+                sample = sorted(list(cls._cache))[:5]
+                print(f"     Examples: {', '.join(sample)}")
+                return cls._cache
+        
+        # Fallback to hardcoded list if fetch/parse fails
+        print("  ⚠️  Could not parse movedefs.lua, using hardcoded all-terrain list")
+        cls._cache = {'TBOT3', 'HTBOT6'}  # Known all-terrain classes
+        return cls._cache
 
 
 class LanguageParser:
@@ -1127,10 +1278,15 @@ class GitHubIconUploader:
         self.icons_dir = "icons"
         self.buildpics_dir = "buildpics"
 
-    def _upload_file(self, file_data: bytes, repo_path: str, commit_msg: str) -> Optional[str]:
+    def _upload_file(self, file_data: bytes, repo_path: str, commit_msg: str) -> tuple[Optional[str], bool]:
         """
         Internal helper: commit a file to the GitHub repo and return its raw URL.
         Creates or updates the file depending on whether it already exists.
+        Skips upload if file already exists with same size (optimization).
+        
+        Returns: (raw_url, was_uploaded)
+            - raw_url: Public GitHub raw URL or None on error
+            - was_uploaded: True if file was actually uploaded, False if skipped
         """
         try:
             import base64
@@ -1139,10 +1295,27 @@ class GitHubIconUploader:
             params    = {"ref": self.branch}
 
             sha = None
+            existing_size = None
             check_response = requests.get(check_url, headers=self.headers, params=params)
+            
             if check_response.status_code == 200:
-                sha = check_response.json().get('sha')
-                print(f"     File exists, updating...")
+                existing = check_response.json()
+                sha = existing.get('sha')
+                existing_size = existing.get('size')
+                
+                # Compare file sizes - if same, skip upload
+                new_size = len(file_data)
+                if existing_size == new_size:
+                    print(f"     File exists with same size ({existing_size} bytes) — skipping upload")
+                    # Return the existing URL with was_uploaded=False
+                    raw_url = (
+                        f"https://raw.githubusercontent.com/"
+                        f"{self.repo_owner}/{self.repo_name}/{self.branch}/{repo_path}"
+                    )
+                    return (raw_url, False)
+                else:
+                    print(f"     File exists but size changed ({existing_size} → {new_size} bytes), updating...")
+                    
             elif check_response.status_code == 404:
                 print(f"     Creating new file...")
             else:
@@ -1164,35 +1337,41 @@ class GitHubIconUploader:
                 f"https://raw.githubusercontent.com/"
                 f"{self.repo_owner}/{self.repo_name}/{self.branch}/{repo_path}"
             )
-            return raw_url
+            return (raw_url, True)
 
         except Exception as e:
             print(f"  ❌ Error uploading to GitHub: {e}")
             if hasattr(e, 'response') and e.response is not None:
                 print(f"     Response: {e.response.text}")
-            return None
+            return (None, False)
     
     def upload_icon(self, file_data: bytes, filename: str) -> Optional[str]:
         """Upload strategic icon WebP to icons/ folder. Returns public raw URL."""
         repo_path = f"{self.icons_dir}/{filename}"
-        url = self._upload_file(
+        url, was_uploaded = self._upload_file(
             file_data, repo_path,
             commit_msg=f"🎨 Add/update strategic icon: {filename}"
         )
         if url:
-            print(f"  ✅ Committed to GitHub: {filename}")
+            if was_uploaded:
+                print(f"  ✅ Committed to GitHub: {filename}")
+            else:
+                print(f"  ✓ Already up-to-date in GitHub: {filename}")
             print(f"     URL: {url}")
         return url
 
     def upload_buildpic(self, file_data: bytes, filename: str) -> Optional[str]:
         """Upload buildpic WebP to buildpics/ folder. Returns public raw URL."""
         repo_path = f"{self.buildpics_dir}/{filename}"
-        url = self._upload_file(
+        url, was_uploaded = self._upload_file(
             file_data, repo_path,
             commit_msg=f"🖼️  Add/update buildpic: {filename}"
         )
         if url:
-            print(f"  ✅ Committed to GitHub: {filename}")
+            if was_uploaded:
+                print(f"  ✅ Committed to GitHub: {filename}")
+            else:
+                print(f"  ✓ Already up-to-date in GitHub: {filename}")
             print(f"     URL: {url}")
         return url
 
@@ -1204,10 +1383,11 @@ class UnitSyncService:
         self.github = github_fetcher
         self.webflow = webflow_api
         self.parser = LuaParser()
-        self.movement_lists   = {}   # Loaded from alldefs_post.lua
-        self.language_data    = {}   # Loaded from language/en/units.json
-        self._buildoptions_map = {}  # { unit_name: [units_it_can_build] } — from cache/archive
-        self._webflow_id_map   = {}  # { unit_name: webflow_item_id }       — built from Webflow items
+        self.movement_lists    = {}   # Loaded from alldefs_post.lua
+        self.allterrain_classes = set()  # Loaded from movedefs.lua
+        self.language_data     = {}   # Loaded from language/en/units.json
+        self._buildoptions_map = {}   # { unit_name: [units_it_can_build] } — from cache/archive
+        self._webflow_id_map   = {}   # { unit_name: webflow_item_id }       — built from Webflow items
     
     def detect_faction(self, unit_name: str) -> Optional[Dict]:
         """
@@ -1385,6 +1565,7 @@ class UnitSyncService:
           Capturer         — cancapture = true
           Transport        — transportsize > 0
           Stealth Detector — seismicdistance > 0
+          All-terrain      — movementclass has no maxslope or maxslope = SLOPE.MAXIMUM
         """
         specials = []
 
@@ -1422,6 +1603,11 @@ class UnitSyncService:
             specials.append('Transport')
         if _num('seismicdistance') > 0:
             specials.append('Stealth Detector')
+        
+        # All-terrain detection based on movementclass
+        movementclass = unit_data.get('movementclass', '').upper()
+        if movementclass and movementclass in self.allterrain_classes:
+            specials.append('All-terrain')
 
         return ', '.join(specials)
 
@@ -1485,7 +1671,7 @@ class UnitSyncService:
         if unit_type_key and unit_type_key in UNIT_TYPE_MAP:
             webflow_fields['unittype'] = UNIT_TYPE_MAP[unit_type_key]['id']
 
-        # Handle weapon fields (DPS, range, weapon type list)
+        # Handle weapon fields (DPS, range, weapon type list, stockpile, impulse, aoe)
         if github_data.get('_has_weapondefs'):
             dps = github_data.get('_dps', 0)
             if dps and dps > 0:
@@ -1496,6 +1682,17 @@ class UnitSyncService:
             wt = github_data.get('_weapons_text', '')
             if wt:
                 webflow_fields['weapons'] = wt
+            sl = github_data.get('_stockpile_limit')
+            if sl is not None:
+                webflow_fields['stockpile-limit'] = int(sl)
+            # Impulsefactor (max across all damage-dealing weapons, 2 decimals)
+            imp = github_data.get('_max_impulsefactor')
+            if imp is not None:
+                webflow_fields['weapon-max-impulse'] = float(imp)
+            # Area of effect (max across all damage-dealing weapons, integer)
+            aoe = github_data.get('_max_areaofeffect')
+            if aoe is not None:
+                webflow_fields['weapon-area-of-effect'] = int(aoe)
 
         # Handle buildoptions multi-reference field
         # Look up what this unit can build, then resolve each to a Webflow item ID
@@ -1647,8 +1844,11 @@ class UnitSyncService:
         Download the entire repository as a zip archive and scan all unit .lua
         files for buildoptions in a single pass.
 
+        Builds a RECURSIVE build tree starting from commanders (armcom, corcom, legcom).
+        Only units reachable from commanders are considered buildable.
+
         Builds two indexes and caches both to .buildable_cache.json:
-          - buildable      : set of all unit names that appear in any buildoptions
+          - buildable      : set of unit names reachable from commanders
           - buildoptions_map : { unit_name: [list_of_units_it_can_build] }
 
         Subsequent runs load from cache. Use --clear-cache to force a refresh.
@@ -1721,20 +1921,61 @@ class UnitSyncService:
             # Store on instance for use during sync
             self._buildoptions_map = buildoptions_map
 
+            # --- Build recursive tree from commanders ---
+            print(f"  🌳 Building recursive build tree from commanders...")
+            COMMANDERS = {'armcom', 'corcom', 'legcom'}
+            buildable_from_commanders = set()
+            commander_stats = {}  # Track per-commander statistics
+            
+            def collect_buildable_recursive(unit_name: str, visited: set):
+                """Recursively collect all units buildable from this unit."""
+                if unit_name in visited:
+                    return
+                visited.add(unit_name)
+                buildable_from_commanders.add(unit_name)
+                
+                # Get what this unit can build
+                can_build = buildoptions_map.get(unit_name.lower(), [])
+                for child_unit in can_build:
+                    collect_buildable_recursive(child_unit, visited)
+            
+            # Start from each commander and recursively collect their build trees
+            for commander in COMMANDERS:
+                visited_for_commander = set()
+                collect_buildable_recursive(commander, visited_for_commander)
+                commander_stats[commander] = len(visited_for_commander)
+            
+            print(f"  ✅ Found {len(buildable_from_commanders)} units buildable from commanders")
+            print(f"     (was {len(all_buildable)} if we counted ALL units in any buildoptions)")
+            print(f"     Breakdown per faction:")
+            for commander, count in sorted(commander_stats.items()):
+                faction = commander[:3].upper()
+                print(f"       {faction}: {count} units from {commander}")
+            
+            # Show excluded units for debugging
+            excluded = all_buildable - buildable_from_commanders
+            if excluded:
+                print(f"     Excluded {len(excluded)} units not in commander trees")
+                # Show first 10 as examples
+                sample = sorted(list(excluded))[:10]
+                print(f"       Examples: {', '.join(sample)}")
+                if len(excluded) > 10:
+                    print(f"       ... and {len(excluded) - 10} more")
+
             # --- Save to cache ---
             try:
                 with open(BUILDABLE_CACHE_FILE, 'w') as f:
                     json.dump({
                         'repo':             GITHUB_REPO,
                         'branch':           GITHUB_BRANCH,
-                        'buildable':        sorted(all_buildable),
+                        'buildable':        sorted(buildable_from_commanders),
                         'buildoptions_map': buildoptions_map,
                     }, f, indent=2)
                 print(f"  💾 Saved buildable index + buildoptions map to {BUILDABLE_CACHE_FILE}")
             except Exception as e:
                 print(f"  ⚠️  Could not save buildable cache: {e}")
 
-            return all_buildable
+            return buildable_from_commanders
 
         except Exception as e:
             print(f"  ❌ Archive download failed: {e}")
@@ -1762,6 +2003,7 @@ class UnitSyncService:
         github_token = os.environ.get("GITHUB_TOKEN")
         
         self.movement_lists = AllDefsParser.get_movement_lists(GITHUB_REPO, GITHUB_BRANCH, github_token)
+        self.allterrain_classes = MoveDefsParser.get_allterrain_classes(GITHUB_REPO, GITHUB_BRANCH, github_token)
         self.language_data = LanguageParser.fetch_and_parse(GITHUB_REPO, GITHUB_BRANCH, github_token)
         print()
         
@@ -1871,6 +2113,43 @@ class UnitSyncService:
         
         print()
         
+        # Step 2b: Unpublish items not in buildable tree
+        print("Step 2b: Checking for published items not in commander build tree...")
+        unpublish_count = 0
+        unpublished_examples = []
+        
+        for unit_name, item in webflow_lookup.items():
+            # Check if this item is already archived
+            is_archived = item.get('isArchived', False)
+            
+            # Skip if already archived
+            if is_archived:
+                continue
+            
+            # Check if unit is NOT in buildable tree
+            if unit_name not in all_buildable:
+                unpublish_count += 1
+                unpublished_examples.append(unit_name)
+                
+                if dry_run:
+                    print(f"  🔍 Would archive (unpublish): {unit_name}")
+                else:
+                    print(f"  📦 Archiving: {unit_name}")
+                    # Archive the item (fully unpublish)
+                    success = self.webflow.unpublish_item(item['id'])
+                    if not success:
+                        print(f"     ⚠️  Failed to archive {unit_name}")
+        
+        if unpublish_count == 0:
+            print("  ✅ All published items are in the commander build tree")
+        else:
+            action = "Would archive" if dry_run else "Archived"
+            print(f"  ✅ {action} {unpublish_count} items not in build tree")
+            if unpublished_examples[:5]:
+                print(f"     Examples: {', '.join(unpublished_examples[:5])}")
+        
+        print()
+        
         # Step 3: Process each unit
         print("Step 3: Processing units...")
         print()
@@ -1889,6 +2168,9 @@ class UnitSyncService:
             'weapons':             'Weapons          ',
             'specials':            'Specials         ',
             'buildpic-in-game':    'BuildPic In-game ',
+            'stockpile-limit':     'Stockpile Limit  ',
+            'weapon-max-impulse':  'Max Impulse      ',
+            'weapon-area-of-effect': 'Max Area of Effect',
             'metal-cost':          'Metal Cost       ',
             'energy-cost':         'Energy Cost      ',
             'build-cost':          'Build Cost       ',
@@ -1902,6 +2184,7 @@ class UnitSyncService:
             'energy-make':         'Energy Make      ',
             'buildpower':          'Build Power      ',
             'cloak-cost':          'Cloak Cost       ',
+            'cloak-cost-moving':   'Cloak Cost Moving',
             'paralyze-multiplier': 'Paralyze Mult    ',
         }
         

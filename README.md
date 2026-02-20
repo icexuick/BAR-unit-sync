@@ -9,9 +9,10 @@ Automatically sync unit data from the [Beyond All Reason GitHub repository](http
 
 ## 🎯 Features
 
-- ✅ Fetches all `.lua` unit files from the BAR GitHub repository
+- ✅ Syncs **36 fields** total: 17 direct stats + 13 computed + 4 references + 2 images
 - ✅ **Auto-creates new units** as drafts in Webflow when they don't exist yet
-- ✅ Only syncs **buildable units** (units that appear in any `buildoptions` list) + whitelist for commanders
+- ✅ Only syncs **buildable units** (recursive tree from commanders: armcom, corcom, legcom)
+- ✅ **Auto-unpublishes** units not in commander tree (sets published items to draft)
 - ✅ Parses unit definitions and extracts all relevant fields
 - ✅ Calculates **DPS** using BAR's official formula (damage × reload × salvo × burst × projectiles)
 - ✅ Detects **weapon types** and filters out zero-damage/unequipped weapons
@@ -31,7 +32,7 @@ Automatically sync unit data from the [Beyond All Reason GitHub repository](http
 
 ---
 
-## 📊 Synced Fields (31 total)
+## 📊 Synced Fields (36 total)
 
 ### Direct fields (from `.lua` unit file)
 
@@ -50,6 +51,7 @@ Automatically sync unit data from the [Beyond All Reason GitHub repository](http
 | `jammerdistance` | `jammerrange` | Number |
 | `mass` | `mass` | Number |
 | `cloakcost` | `cloak-cost` | Number |
+| `cloakcostmoving` | `cloak-cost-moving` | Number |
 | `customparams.paralyzemultiplier` | `paralyze-multiplier` | Number |
 | `customparams.techlevel` | `techlevel` | Number |
 
@@ -66,6 +68,9 @@ Automatically sync unit data from the [Beyond All Reason GitHub repository](http
 | DPS | `dps` | Number | `(max(dmg_vtol, dmg_default) × (1/reload)) × salvosize × burst × projectiles` |
 | Weapon Range | `weaponrange` | Number | Highest range across all equipped non-bogus weapons |
 | Weapons | `weapons` | PlainText | e.g. `LaserCannon, 2x MissileLauncher, EMP-BeamLaser` |
+| Stockpile Limit | `stockpile-limit` | Number | From `weapondefs.<n>.customparams.stockpilelimit` (if weapon has stockpile) |
+| Max Impulse | `weapon-max-impulse` | Number (2 decimals) | Highest `impulsefactor` from damage-dealing weapons (knockback force) |
+| Max Area of Effect | `weapon-area-of-effect` | Number (integer) | Highest `areaofeffect` from damage-dealing weapons (splash radius) |
 | Specials | `specials` | PlainText | Comma-separated special abilities (see below) |
 
 ### Images (synced via GitHub hosting)
@@ -186,10 +191,10 @@ Caches individual unit `.lua` file contents fetched from GitHub.
 ### `.buildable_cache.json`
 Built once by downloading the entire BAR repository as a ZIP archive and scanning all unit files. Stores two indexes:
 
-- `buildable` — set of all unit names that appear in any `buildoptions` list
+- `buildable` — set of unit names **reachable from commanders** via recursive build tree
 - `buildoptions_map` — maps each unit name to the list of units it can build
 
-> The script only syncs **buildable units** — those that appear in at least one factory's buildoptions. This filters out ~230 internal/unused units out of ~850 total. A small whitelist (commanders) is always included regardless.
+> The script only syncs **buildable units** — those reachable from the three faction commanders (armcom, corcom, legcom) through their build chains. Units not in any commander's build tree (like internal test units, unused variants, or raptor units with no builder) are automatically excluded.
 
 **When to clear cache:**
 ```bash
@@ -217,7 +222,7 @@ The formula uses `dmg_vtol` when it is higher than `dmg_default`, matching the g
 - Both `dmg_default` and `dmg_vtol` are zero or absent
 - `customparams.bogus = 1` AND `dmg = 0` (bogus weapons with real damage ARE included)
 
-**EMP / paralyzer weapons** (`paralyzer = true`) appear in the `weapons` field with an `EMP-` prefix (e.g. `EMP-BeamLaser`) but do **not** contribute to the DPS value.
+**EMP / paralyzer weapons** (`paralyzer = true`) appear in the `weapons` field with an `EMP-` prefix (e.g. `EMP-BeamLaser`) and **do** contribute to the DPS value (their damage is included in the total).
 
 ---
 
@@ -245,6 +250,15 @@ Icons require the `--sync-icons` flag and parse `icontypes.lua` from the BAR rep
 4. Commits the WebP to your repo at `icons/<unitname>.webp`
 5. Sets the raw GitHub URL in Webflow's `icon` field
 
+### Optimization
+
+The sync automatically **skips re-uploading** files that already exist with the same size:
+- Compares file size on GitHub vs new WebP file
+- Skips commit if sizes match (no changes)
+- Only uploads when size differs or file is new
+
+This drastically reduces GitHub API calls and commit noise on subsequent syncs.
+
 ### Setup — add to `.env`:
 ```
 GITHUB_TOKEN=ghp_your_token_here
@@ -271,6 +285,32 @@ your-repo/
 
 ---
 
+
+## 🔄 Auto-Unpublish Non-Buildable Units
+
+The sync automatically manages published status based on the commander build tree:
+
+**Step 2b: Checking published items**
+- Scans all Webflow items for units **not** in the commander tree
+- If published (not draft): automatically sets `isDraft: true`
+- If already draft or archived: skips (no change)
+
+**Console output:**
+```
+Step 2b: Checking for published items not in commander build tree...
+  📝 Setting to draft: chicken_drone
+  📝 Setting to draft: testunit_alpha
+  ✅ Unpublished 15 items not in build tree
+     Examples: chicken_drone, raptor1, testunit_alpha, ...
+```
+
+**Dry-run mode:**
+```bash
+python sync_units_github_to_webflow.py --dry-run
+```
+Shows which items would be unpublished without making changes.
+
+---
 ## 🆕 Creating New Units
 
 When the script encounters a buildable unit that doesn't exist in Webflow yet, it automatically creates it:
@@ -361,10 +401,12 @@ WEBFLOW_SITE_ID       = "5c68622246b367adf6f3041d"
 WEBFLOW_COLLECTION_ID = "6564c6553676389f8ba45a9e"
 ```
 
-**Whitelist** — units always synced even if not in any buildoptions:
+**Commander seeds** — the recursive tree starts from these three units:
 ```python
-SYNC_WHITELIST = {"armcom", "corcom", "legcom"}
+COMMANDERS = {"armcom", "corcom", "legcom"}
 ```
+
+All units buildable from these commanders (factories → basic units → advanced units, etc.) are automatically included.
 
 **Faction map** — maps filename prefix to Webflow reference item ID:
 ```python
