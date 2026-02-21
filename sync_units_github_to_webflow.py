@@ -114,13 +114,13 @@ SKIP_FIELDS = ["weapons", "dps", "weaponrange"]
 class RateLimiter:
     """Simple rate limiter to stay under Webflow API limits."""
     
-    def __init__(self, max_requests_per_minute: int = 110):
+    def __init__(self, max_requests_per_minute: int = 60):
         """
         Initialize rate limiter.
         
         Args:
-            max_requests_per_minute: Max requests allowed (default 110 for safety margin)
-                                     Webflow Business: 120/min, we use 110 for buffer
+            max_requests_per_minute: Max requests allowed (default 60 for safety margin)
+                                     Webflow Business: 120/min, we use 60 to allow concurrent syncs
         """
         self.max_requests = max_requests_per_minute
         self.requests = []
@@ -347,6 +347,9 @@ class LuaParser:
             'weapons_text':  '',
             'has_weapondefs': False,
             'has_damage':    False,
+            'can_target_surface': False,
+            'can_target_air': False,
+            'can_target_subs': False,
         }
 
         # ── Step 1: parse all weapondefs into a dict keyed by UPPERCASE name ──
@@ -483,6 +486,14 @@ class LuaParser:
             # Track max areaofeffect (only from weapons with damage > 0)
             if wd['areaofeffect'] > max_areaofeffect:
                 max_areaofeffect = wd['areaofeffect']
+            
+            # Detect target capabilities
+            if wd['dmg_default'] > 0:
+                result['can_target_surface'] = True
+            if wd['dmg_vtol'] > 0:
+                result['can_target_air'] = True
+            if wd['dmg_subs'] > 0:
+                result['can_target_subs'] = True
 
             # Add EMP prefix to paralyzer weapons in the weapon list
             if wd['paralyzer']:
@@ -574,7 +585,7 @@ class LuaParser:
                 if bo_block and re.search(r'"(\w+)"', bo_block):
                     unit_data['_has_buildoptions'] = True
 
-            # Parse weapons: DPS, range, weapon type list, stockpile limit, impulse, aoe
+            # Parse weapons: DPS, range, weapon type list, stockpile limit, impulse, aoe, targets
             weapon_result = LuaParser.parse_weapons(unit_block)
             unit_data['_has_weapondefs'] = weapon_result['has_weapondefs']
             unit_data['_has_damage']     = weapon_result['has_damage']
@@ -585,6 +596,9 @@ class LuaParser:
                 unit_data['_stockpile_limit']  = weapon_result['stockpile_limit']
                 unit_data['_max_impulsefactor'] = weapon_result['max_impulsefactor']
                 unit_data['_max_areaofeffect'] = weapon_result['max_areaofeffect']
+                unit_data['_can_target_surface'] = weapon_result['can_target_surface']
+                unit_data['_can_target_air'] = weapon_result['can_target_air']
+                unit_data['_can_target_subs'] = weapon_result['can_target_subs']
             
             # Extract key-value pairs (excluding nested tables like customparams)
             # Pattern for simple key = value pairs (not followed by {)
@@ -1693,6 +1707,10 @@ class UnitSyncService:
             aoe = github_data.get('_max_areaofeffect')
             if aoe is not None:
                 webflow_fields['weapon-area-of-effect'] = int(aoe)
+            # Target capabilities (booleans)
+            webflow_fields['can-target-surface'] = github_data.get('_can_target_surface', False)
+            webflow_fields['can-target-air'] = github_data.get('_can_target_air', False)
+            webflow_fields['can-target-subs'] = github_data.get('_can_target_subs', False)
 
         # Handle buildoptions multi-reference field
         # Look up what this unit can build, then resolve each to a Webflow item ID
