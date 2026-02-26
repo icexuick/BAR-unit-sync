@@ -343,6 +343,7 @@ class LuaParser:
         """
         result = {
             'dps':           0,
+            'dot':           0,  # Damage Over Time (cluster/napalm)
             'weaponrange':   0,
             'weapons_text':  '',
             'has_weapondefs': False,
@@ -381,23 +382,45 @@ class LuaParser:
             if not wblock:
                 continue
 
-            # Parse damage { default = X, vtol = Y }
+            # Parse damage { default = X, vtol = Y, subs = Z, commanders = W }
             dmg_default = 0.0
             dmg_vtol    = 0.0
+            dmg_subs    = 0.0
+            dmg_commanders = 0.0
             dmg_match   = re.search(r'\bdamage\s*=\s*\{', wblock, re.IGNORECASE)
             if dmg_match:
                 dmg_block = LuaParser.extract_balanced_braces(wblock, dmg_match.end() - 1)
                 if dmg_block:
                     d = _val(dmg_block, 'default', float)
                     v = _val(dmg_block, 'vtol',    float)
+                    s = _val(dmg_block, 'subs',    float)
+                    c = _val(dmg_block, 'commanders', float)
                     dmg_default = d or 0.0
                     dmg_vtol    = v or 0.0
+                    dmg_subs    = s or 0.0
+                    dmg_commanders = c or 0.0
 
             is_paralyzer = bool(re.search(r'\bparalyzer\s*=\s*true', wblock, re.IGNORECASE))
 
-            # Check customparams { bogus = 1, stockpilelimit = X } inside this weapondef
+            # Check customparams { bogus = 1, stockpilelimit = X, cluster_number, cluster_def, area_onhit, spark } inside this weapondef
             is_bogus_cp = False
             stockpile_limit = None
+            cluster_number = None
+            cluster_def = None
+            area_onhit_damage = None
+            area_onhit_time = None
+            spark_forkdamage = None  # Lightning - ONLY in customparams
+            spark_maxunits = None    # Lightning - ONLY in customparams
+            
+            # Try root level first for cluster info
+            cn_match_root = re.search(r'\bcluster_number\s*=\s*([0-9]+)', wblock, re.IGNORECASE)
+            if cn_match_root:
+                cluster_number = int(cn_match_root.group(1))
+            
+            cd_match_root = re.search(r'\bcluster_def\s*=\s*["\']?(\w+)["\']?', wblock, re.IGNORECASE)
+            if cd_match_root:
+                cluster_def = cd_match_root.group(1)
+            
             wcp_match = re.search(r'\bcustomparams\s*=\s*\{', wblock, re.IGNORECASE)
             if wcp_match:
                 wcp_block = LuaParser.extract_balanced_braces(wblock, wcp_match.end() - 1)
@@ -408,6 +431,31 @@ class LuaParser:
                     sl_match = re.search(r'\bstockpilelimit\s*=\s*([0-9]+)', wcp_block, re.IGNORECASE)
                     if sl_match:
                         stockpile_limit = int(sl_match.group(1))
+                    # Extract cluster info from customparams if not found in root
+                    if not cluster_number:
+                        cn_match = re.search(r'\bcluster_number\s*=\s*([0-9]+)', wcp_block, re.IGNORECASE)
+                        if cn_match:
+                            cluster_number = int(cn_match.group(1))
+                    if not cluster_def:
+                        cd_match = re.search(r'\bcluster_def\s*=\s*["\']?(\w+)["\']?', wcp_block, re.IGNORECASE)
+                        if cd_match:
+                            cluster_def = cd_match.group(1)
+                    # Extract napalm DOT info
+                    aod_match = re.search(r'\barea_onhit_damage\s*=\s*([0-9.]+)', wcp_block, re.IGNORECASE)
+                    if aod_match:
+                        area_onhit_damage = float(aod_match.group(1))
+                    aot_match = re.search(r'\barea_onhit_time\s*=\s*([0-9.]+)', wcp_block, re.IGNORECASE)
+                    if aot_match:
+                        area_onhit_time = float(aot_match.group(1))
+                    # Extract lightning spark info from customparams if not found in root
+                    if not spark_forkdamage:
+                        sf_match_cp = re.search(r'\bspark_forkdamage\s*=\s*["\']?([0-9.]+)["\']?', wcp_block, re.IGNORECASE)
+                        if sf_match_cp:
+                            spark_forkdamage = float(sf_match_cp.group(1))
+                    if not spark_maxunits:
+                        sm_match_cp = re.search(r'\bspark_maxunits\s*=\s*["\']?([0-9]+)["\']?', wcp_block, re.IGNORECASE)
+                        if sm_match_cp:
+                            spark_maxunits = int(sm_match_cp.group(1))
 
             weapondefs[wname.upper()] = {
                 'def_name':      (_val(wblock, 'name') or '').lower(),
@@ -424,6 +472,14 @@ class LuaParser:
                 'areaofeffect':  _val(wblock, 'areaofeffect',  float) or 0.0,
                 'dmg_default':   dmg_default,
                 'dmg_vtol':      dmg_vtol,
+                'dmg_subs':      dmg_subs,
+                'dmg_commanders': dmg_commanders,
+                'cluster_number': cluster_number,
+                'cluster_def':    cluster_def,
+                'area_onhit_damage': area_onhit_damage,
+                'area_onhit_time': area_onhit_time,
+                'spark_forkdamage': spark_forkdamage,
+                'spark_maxunits': spark_maxunits,
             }
 
         # ── Step 2: parse weapons = { } to find which weapondefs are used ─────
@@ -465,14 +521,45 @@ class LuaParser:
 
             # Pick higher damage tier (vtol vs default) — mirrors Lua logic
             dmg = wd['dmg_vtol'] if wd['dmg_vtol'] > wd['dmg_default'] else wd['dmg_default']
+            weapon_dot_dps = 0
+            
+            # Check if this is a cluster weapon - DOT only (not main DPS)
+            if wd.get('cluster_number') and wd.get('cluster_def'):
+                cluster_def_key = wd['cluster_def'].upper()
+                cluster_wd = weapondefs.get(cluster_def_key)
+                if cluster_wd:
+                    # Cluster DOT = (cluster_number × cluster_damage) / reload
+                    cluster_dmg = cluster_wd['dmg_default']
+                    cluster_total = wd['cluster_number'] * cluster_dmg
+                    weapon_dot_dps = (cluster_total / (wd['reloadtime'] or 1.0)) * wd['salvosize'] * wd['burst'] * wd['projectiles']
 
-            # Skip if no damage (regardless of paralyzer or bogus flag)
+            # Skip if no main damage (regardless of paralyzer or bogus flag)
             if dmg <= 0:
                 continue
 
-            # Calculate DPS for ALL weapons (including paralyzers)
+            # Calculate main projectile DPS (WITHOUT cluster/napalm)
             reload = wd['reloadtime'] or 1.0
-            dps += (dmg * (1.0 / reload)) * wd['salvosize'] * wd['burst'] * wd['projectiles']
+            main_dps = (dmg * (1.0 / reload)) * wd['salvosize'] * wd['burst'] * wd['projectiles']
+            
+            # Add napalm DOT if present
+            if wd.get('area_onhit_damage') and wd.get('area_onhit_time'):
+                # Napalm DOT = (area_damage × area_time) / reload
+                napalm_total = wd['area_onhit_damage'] * wd['area_onhit_time']
+                napalm_dot = (napalm_total / reload) * wd['salvosize'] * wd['burst'] * wd['projectiles']
+                weapon_dot_dps += napalm_dot
+            
+            # Add lightning chain damage if present
+            if wd.get('spark_forkdamage') and wd.get('spark_maxunits'):
+                # Lightning DOT = (default_damage × burst × spark_forkdamage × spark_maxunits) / reload
+                base_dmg = wd['dmg_default']
+                fork_dmg_per_target = base_dmg * wd['burst'] * wd['spark_forkdamage']
+                total_fork_dmg = fork_dmg_per_target * wd['spark_maxunits']
+                lightning_dot = (total_fork_dmg / reload) * wd['salvosize'] * wd['projectiles']
+                weapon_dot_dps += lightning_dot
+            
+            # Accumulate separately
+            dps += main_dps
+            result['dot'] += weapon_dot_dps
             result['has_damage'] = True
 
             # Track max range
@@ -591,6 +678,7 @@ class LuaParser:
             unit_data['_has_damage']     = weapon_result['has_damage']
             if weapon_result['has_weapondefs']:
                 unit_data['_dps']              = weapon_result['dps']
+                unit_data['_dot']              = weapon_result['dot']  # Damage Over Time
                 unit_data['_weaponrange']      = weapon_result['weaponrange']
                 unit_data['_weapons_text']     = weapon_result['weapons_text']
                 unit_data['_stockpile_limit']  = weapon_result['stockpile_limit']
@@ -1690,6 +1778,9 @@ class UnitSyncService:
             dps = github_data.get('_dps', 0)
             if dps and dps > 0:
                 webflow_fields['dps'] = int(dps)
+            dot = github_data.get('_dot', 0)
+            if dot and dot > 0:
+                webflow_fields['dot'] = int(dot)
             wr = github_data.get('_weaponrange', 0)
             if wr and wr > 0:
                 webflow_fields['weaponrange'] = int(wr)

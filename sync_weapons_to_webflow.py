@@ -354,15 +354,83 @@ class WeaponParser:
             # Parse damage block
             damage = WeaponParser.parse_damage_block(wblock)
             
-            # Parse customparams for stockpilelimit
+            # Parse interceptor flag (anti-nuke indicator)
+            interceptor = False
+            int_match = re.search(r'\binterceptor\s*=\s*([0-9]+)', wblock, re.IGNORECASE)
+            if int_match:
+                interceptor = int(int_match.group(1)) == 1
+            
+            # Parse cluster info from weapondef root level (FIRST)
+            cluster_number = None
+            cluster_def = None
+            
+            # Try root level
+            cn_match_root = re.search(r'\bcluster_number\s*=\s*([0-9]+)', wblock, re.IGNORECASE)
+            if cn_match_root:
+                cluster_number = int(cn_match_root.group(1))
+            
+            cd_match_root = re.search(r'\bcluster_def\s*=\s*["\']?(\w+)["\']?', wblock, re.IGNORECASE)
+            if cd_match_root:
+                cluster_def = cd_match_root.group(1)
+            else:
+                # Try alternative format: cluster_def = [[name]]
+                cd_match_alt = re.search(r'\bcluster_def\s*=\s*\[\[(\w+)\]\]', wblock, re.IGNORECASE)
+                if cd_match_alt:
+                    cluster_def = cd_match_alt.group(1)
+            
+            # Lightning spark info - ONLY in customparams (initialize here)
+            spark_forkdamage = None
+            spark_maxunits = None
+            
+            # Parse customparams for stockpilelimit, overpenetrate, and cluster info (override if found)
             stockpile_limit = None
+            overpenetrate = False
+            area_onhit_damage = None
+            area_onhit_time = None
             wcp_match = re.search(r'\bcustomparams\s*=\s*\{', wblock, re.IGNORECASE)
             if wcp_match:
                 wcp_block = LuaParser.extract_balanced_braces(wblock, wcp_match.end() - 1)
                 if wcp_block:
+                    # Stockpile limit
                     sl_match = re.search(r'\bstockpilelimit\s*=\s*([0-9]+)', wcp_block, re.IGNORECASE)
                     if sl_match:
                         stockpile_limit = int(sl_match.group(1))
+                    # Overpenetrate (railgun indicator)
+                    op_match = re.search(r'\boverpenetrate\s*=\s*(true|false)', wcp_block, re.IGNORECASE)
+                    if op_match:
+                        overpenetrate = op_match.group(1).lower() == 'true'
+                    # Area onhit damage (napalm indicator)
+                    aod_match = re.search(r'\barea_onhit_damage\s*=\s*([0-9.]+)', wcp_block, re.IGNORECASE)
+                    if aod_match:
+                        area_onhit_damage = float(aod_match.group(1))
+                    # Area onhit time (napalm duration)
+                    aot_match = re.search(r'\barea_onhit_time\s*=\s*([0-9.]+)', wcp_block, re.IGNORECASE)
+                    if aot_match:
+                        area_onhit_time = float(aot_match.group(1))
+                    # Lightning spark info (check customparams too)
+                    if not spark_forkdamage:
+                        sf_match_cp = re.search(r'\bspark_forkdamage\s*=\s*["\']?([0-9.]+)["\']?', wcp_block, re.IGNORECASE)
+                        if sf_match_cp:
+                            spark_forkdamage = float(sf_match_cp.group(1))
+                    if not spark_maxunits:
+                        sm_match_cp = re.search(r'\bspark_maxunits\s*=\s*["\']?([0-9]+)["\']?', wcp_block, re.IGNORECASE)
+                        if sm_match_cp:
+                            spark_maxunits = int(sm_match_cp.group(1))
+                    # Cluster number (cluster plasma indicator) - check customparams too
+                    cn_match = re.search(r'\bcluster_number\s*=\s*([0-9]+)', wcp_block, re.IGNORECASE)
+                    if cn_match and not cluster_number:
+                        cluster_number = int(cn_match.group(1))
+                    
+                    # Cluster def (name of child weapondef)
+                    cd_match = re.search(r'\bcluster_def\s*=\s*["\']?(\w+)["\']?', wcp_block, re.IGNORECASE)
+                    if cd_match and not cluster_def:
+                        cluster_def = cd_match.group(1)
+                    
+                    # Try alternative format in customparams too
+                    if not cluster_def:
+                        cd_match_alt = re.search(r'\bcluster_def\s*=\s*\[\[(\w+)\]\]', wcp_block, re.IGNORECASE)
+                        if cd_match_alt:
+                            cluster_def = cd_match_alt.group(1)
             
             # Build weapon data dict with all fields
             weapon_data = {
@@ -370,6 +438,16 @@ class WeaponParser:
                 'name': f"{unit_name}-{weapondef_key}",  # armcom-armcomlaser
                 'full_name': _val(wblock, 'name') or weapondef_key,  # "Laser"
                 'weapon_type': _val(wblock, 'weapontype') or 'Unknown',
+                
+                # Special flags for category detection
+                '_overpenetrate': overpenetrate,  # Railgun indicator
+                '_interceptor': interceptor,  # Anti-nuke indicator
+                '_cluster_number': cluster_number,  # Cluster plasma indicator
+                '_cluster_def': cluster_def,  # Name of cluster child weapondef
+                '_area_onhit_damage': area_onhit_damage,  # Napalm DOT damage
+                '_area_onhit_time': area_onhit_time,  # Napalm DOT duration
+                '_spark_forkdamage': spark_forkdamage,  # Lightning chain damage multiplier
+                '_spark_maxunits': spark_maxunits,  # Lightning chain max targets
                 
                 # Damage stats
                 'dps': 0,  # Calculated later
@@ -439,11 +517,63 @@ class WeaponParser:
             weapon = weapondefs_dict[weapondef_key].copy()
             weapon['weapon_count'] = count
             
-            # Calculate DPS (only if damage > 0)
+            # Calculate DPS (only main projectile damage)
             dmg = max(weapon['damage_vtol'], weapon['damage_default'])
+            dot_dps = 0  # Damage Over Time from cluster/napalm
+            
+            # Check if this is a cluster weapon
+            if weapon.get('_cluster_number') and weapon.get('_cluster_def'):
+                cluster_num = weapon['_cluster_number']
+                cluster_def_key = weapon['_cluster_def'].upper()
+                
+                # Try to find cluster def weapondef (not in weapons array!)
+                if cluster_def_key in weapondefs_dict:
+                    cluster_def_data = weapondefs_dict[cluster_def_key]
+                    cluster_dmg = cluster_def_data.get('damage_default', 0)
+                    
+                    # Cluster DOT = (cluster_number × cluster_damage) / reload
+                    # This is the extra damage from cluster projectiles AFTER main impact
+                    cluster_total = cluster_num * cluster_dmg
+                    dot_dps = (cluster_total / weapon['reload_time']) * weapon['_salvosize'] * weapon['burst'] * weapon['projectiles']
+                    
+                    # Store cluster info
+                    weapon['_has_cluster'] = True
+                    weapon['_cluster_child_damage'] = cluster_dmg
+                else:
+                    weapon['_has_cluster'] = False
+            
+            # Check for napalm DOT
+            if weapon.get('_area_onhit_damage') and weapon.get('_area_onhit_time'):
+                # Napalm DOT = (area_damage × area_time) / reload
+                # This is the extra damage from burning AFTER main impact
+                napalm_total = weapon['_area_onhit_damage'] * weapon['_area_onhit_time']
+                napalm_dot = (napalm_total / weapon['reload_time']) * weapon['_salvosize'] * weapon['burst'] * weapon['projectiles']
+                
+                # Add to DOT (could have both cluster AND napalm theoretically)
+                dot_dps += napalm_dot
+                weapon['_has_napalm'] = True
+            
+            # Check for lightning chain damage
+            if weapon.get('_spark_forkdamage') and weapon.get('_spark_maxunits'):
+                # Lightning DOT = (default_damage × burst × spark_forkdamage × spark_maxunits) / reload
+                # This is the chain lightning damage to secondary targets
+                base_dmg = weapon['damage_default']
+                fork_dmg_per_target = base_dmg * weapon['burst'] * weapon['_spark_forkdamage']
+                total_fork_dmg = fork_dmg_per_target * weapon['_spark_maxunits']
+                lightning_dot = (total_fork_dmg / weapon['reload_time']) * weapon['_salvosize'] * weapon['projectiles']
+                
+                # Add to DOT
+                dot_dps += lightning_dot
+                weapon['_has_lightning_chain'] = True
+            
+            # Calculate main projectile DPS (without DOT)
             if dmg > 0 and weapon['reload_time'] > 0:
-                dps = (dmg * (1.0 / weapon['reload_time'])) * weapon['_salvosize'] * weapon['burst'] * weapon['projectiles']
-                weapon['dps'] = int(round(dps))
+                main_dps = (dmg * (1.0 / weapon['reload_time'])) * weapon['_salvosize'] * weapon['burst'] * weapon['projectiles']
+                weapon['dps'] = int(round(main_dps))
+                weapon['dot'] = int(round(dot_dps)) if dot_dps > 0 else 0
+            else:
+                weapon['dps'] = 0
+                weapon['dot'] = 0
             
             # Skip weapons with no damage at all (default, vtol, subs, commanders all zero)
             total_damage = weapon['damage_default'] + weapon['damage_vtol'] + weapon['damage_subs'] + weapon['damage_commanders']
@@ -487,12 +617,67 @@ class WeaponCategoryDetector:
         wtype = weapon.get('weapon_type', '')
         reload = weapon.get('reload_time', 0)
         is_water_weapon = weapon.get('water_weapon', False)
+        weapondef_key = weapon.get('weapondef_key', '').lower()
+        full_name = weapon.get('full_name', '').lower()
+        
+        # Anti-Nuke detection (CHECK FIRST - highest priority)
+        # Multiple indicators: interceptor flag, name indicators
+        is_antinuke = False
+        if weapon.get('_interceptor', False):
+            is_antinuke = True
+        if 'interceptor' in full_name or 'intercepting' in full_name:
+            is_antinuke = True
+        
+        if is_antinuke:
+            return self.category_map.get('anti-nuke')
+        
+        # Napalm Launcher detection (CHECK BEFORE CLUSTER)
+        # Indicators: weapontype Cannon + area_onhit_damage + area_onhit_time
+        is_napalm = False
+        if weapon.get('_area_onhit_damage') and weapon.get('_area_onhit_time'):
+            is_napalm = True
+        
+        if is_napalm and wtype == 'Cannon':
+            return self.category_map.get('napalm-launcher')
+        
+        # Cluster Plasma detection (AFTER NAPALM)
+        # Primary indicator: cluster_number in customparams (ONLY reliable check)
+        is_cluster = False
+        if weapon.get('_cluster_number'):
+            is_cluster = True
+        
+        if is_cluster:
+            return self.category_map.get('cluster-plasma-cannon')
+        
+        # Railgun detection (MUST CHECK FIRST before LaserCannon)
+        # Multiple indicators: weapondef name, overpenetrate, LaserCannon type
+        is_railgun = False
+        if 'rail' in weapondef_key or 'railgun' in weapondef_key or 'rail_accelerator' in weapondef_key:
+            is_railgun = True
+        # Also check if it has overpenetrate flag (stored in weapon data)
+        if weapon.get('_overpenetrate', False):
+            is_railgun = True
+        
+        if is_railgun and wtype == 'LaserCannon':
+            return self.category_map.get('railgun')
+        
+        # Heat Ray detection (MUST CHECK BEFORE general BeamLaser)
+        # Multiple indicators: weapondef name, full name, BeamLaser type
+        is_heatray = False
+        if 'heatray' in weapondef_key or 'heat_ray' in weapondef_key:
+            is_heatray = True
+        if 'heat ray' in full_name or 'heatray' in full_name:
+            is_heatray = True
+        
+        if is_heatray and wtype == 'BeamLaser':
+            return self.category_map.get('heat-ray')
         
         # Sea Laser (LaserCannon + waterweapon)
         if wtype == 'LaserCannon' and is_water_weapon:
             return self.category_map.get('sea-laser-cannon')
         
         # BeamLaser (both continuous and regular go to beam-laser)
+        # This must come AFTER heat ray check!
         if wtype == 'BeamLaser':
             return self.category_map.get('beam-laser')
         
@@ -501,6 +686,7 @@ class WeaponCategoryDetector:
             return self.category_map.get('missile-launcher')
         
         # Vertical Rocket Launcher (StarburstLauncher)
+        # This comes AFTER anti-nuke check!
         if wtype == 'StarburstLauncher':
             return self.category_map.get('vertical-rocket-launcher')
         
@@ -520,7 +706,7 @@ class WeaponCategoryDetector:
         if wtype == 'Flame':
             return self.category_map.get('flamethrower')
         
-        # LaserCannon (regular)
+        # LaserCannon (regular - after railgun and sea laser checks)
         if wtype == 'LaserCannon':
             return self.category_map.get('laser-cannon')
         
@@ -541,7 +727,7 @@ class WeaponCategoryDetector:
             return self.category_map.get('aircraft-bomb')
         
         # D-Gun (special weapon)
-        if 'disintegrator' in weapon.get('weapondef_key', '').lower():
+        if 'disintegrator' in weapondef_key:
             return self.category_map.get('d-gun')
         
         # Default: None (no category)
@@ -655,7 +841,13 @@ class WeaponSyncService:
         
         for weapon in weapons:
             weapon_name = weapon['name']
-            print(f"    🔫 {weapon_name} (count: {weapon['weapon_count']}, DPS: {weapon['dps']})")
+            
+            # Show DOT info if present
+            dot_info = ""
+            if weapon.get('dot', 0) > 0:
+                dot_info = f" [DOT: {weapon['dot']}]"
+            
+            print(f"    🔫 {weapon_name} (count: {weapon['weapon_count']}, DPS: {weapon['dps']}{dot_info})")
             
             # Detect category
             category_id = self.category_detector.detect_category(weapon) if self.category_detector else None
@@ -669,6 +861,7 @@ class WeaponSyncService:
                 
                 # Stats
                 'dps': weapon['dps'],
+                'dot': weapon.get('dot', 0),  # Damage Over Time (cluster/napalm)
                 'reload-time': weapon['reload_time'],
                 'weapon-range': weapon['range'],  # NOT range
                 'accuracy': weapon['accuracy'],
