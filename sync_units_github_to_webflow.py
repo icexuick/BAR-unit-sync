@@ -502,6 +502,7 @@ class LuaParser:
         stockpile_limit = None  # Track highest stockpile limit found
         max_impulsefactor = 0.0  # Track highest impulsefactor (only from weapons with damage)
         max_areaofeffect = 0.0   # Track highest areaofeffect (only from weapons with damage)
+        has_non_paralyzer = False  # Track if unit has any real damage weapons
 
         for def_key in used_defs:
             wd = weapondefs.get(def_key)
@@ -509,7 +510,8 @@ class LuaParser:
                 continue
 
             # Skip weapons with 'bogus' or 'mine' in their name — always placeholders
-            if 'bogus' in wd['def_name'] or 'mine' in wd['def_name']:
+            # Also skip if is_bogus flag is set in customparams
+            if 'bogus' in wd['def_name'] or 'mine' in wd['def_name'] or wd.get('is_bogus', False):
                 continue
 
             # Track stockpile limit (typically only one weapon has this)
@@ -518,6 +520,17 @@ class LuaParser:
                     stockpile_limit = wd['stockpile_limit']
 
             wtype = wd['weapontype']
+
+            # Skip paralyzer weapons (EMP) from DPS calculation - they don't do real damage
+            # But DO continue to track them for other stats (range, etc)
+            if wd.get('paralyzer', False):
+                # Track range even for paralyzer weapons
+                if wd['range'] > weapon_range:
+                    weapon_range = wd['range']
+                continue  # Skip DPS calculation
+            
+            # Mark that we have at least one non-paralyzer weapon
+            has_non_paralyzer = True
 
             # Pick higher damage tier (vtol vs default) — mirrors Lua logic
             dmg = wd['dmg_vtol'] if wd['dmg_vtol'] > wd['dmg_default'] else wd['dmg_default']
@@ -598,9 +611,27 @@ class LuaParser:
         for wname, count in weapon_table.items():
             parts.append(f"{count}x {wname}" if count > 1 else wname)
 
-        result['dps']             = round(dps)
-        result['weaponrange']     = round(weapon_range)
-        result['weapons_text']    = ", ".join(parts)
+        print(f"  🔍 DEBUG weapon_table: {weapon_table}")
+        print(f"  🔍 DEBUG has_non_paralyzer: {has_non_paralyzer}")
+        
+        # If unit only has paralyzer weapons, force DPS/DOT to 0
+        if not has_non_paralyzer:
+            dps = 0
+            result['dot'] = 0
+        
+        # If no weapons remain after filtering (only bogus/mine), clear weapon fields
+        if not weapon_table:
+            print(f"  ⚠️  No weapons in weapon_table - clearing all weapon fields")
+            result['dps'] = 0
+            result['dot'] = 0
+            result['weaponrange'] = 0
+            result['weapons_text'] = ''
+            result['has_weapondefs'] = False
+        else:
+            result['dps'] = round(dps)
+            result['weaponrange'] = round(weapon_range)
+            result['weapons_text'] = ", ".join(parts)
+        
         result['stockpile_limit'] = stockpile_limit  # None if no weapon has it
         result['max_impulsefactor'] = round(max_impulsefactor, 2) if max_impulsefactor > 0 else None
         result['max_areaofeffect']  = round(max_areaofeffect) if max_areaofeffect > 0 else None
@@ -1774,19 +1805,30 @@ class UnitSyncService:
             webflow_fields['unittype'] = UNIT_TYPE_MAP[unit_type_key]['id']
 
         # Handle weapon fields (DPS, range, weapon type list, stockpile, impulse, aoe)
+        # ALWAYS process these fields to allow clearing old values
+        dps = github_data.get('_dps', 0)
+        webflow_fields['dps'] = int(dps) if dps else 0
+        
+        dot = github_data.get('_dot', 0)
+        webflow_fields['dot'] = int(dot) if dot else 0
+        
+        # Always sync weaponrange (even if 0) to clear old values
+        wr = github_data.get('_weaponrange', 0)
+        webflow_fields['weaponrange'] = int(wr) if wr else 0
+        
+        # Always sync weapons text (even if empty) to clear old values
+        wt = github_data.get('_weapons_text', '')
+        webflow_fields['weapons'] = wt if wt else ''
+        
+        # Debug: show what we're sending for weapon fields
+        print(f"  🔧 DEBUG Webflow fields:")
+        print(f"     dps: {webflow_fields.get('dps', 'NOT SET')}")
+        print(f"     dot: {webflow_fields.get('dot', 'NOT SET')}")
+        print(f"     weaponrange: {webflow_fields.get('weaponrange', 'NOT SET')}")
+        print(f"     weapons: '{webflow_fields.get('weapons', 'NOT SET')}'")
+        
+        # Only process additional weapon stats if unit has real weapons
         if github_data.get('_has_weapondefs'):
-            dps = github_data.get('_dps', 0)
-            if dps and dps > 0:
-                webflow_fields['dps'] = int(dps)
-            dot = github_data.get('_dot', 0)
-            if dot and dot > 0:
-                webflow_fields['dot'] = int(dot)
-            wr = github_data.get('_weaponrange', 0)
-            if wr and wr > 0:
-                webflow_fields['weaponrange'] = int(wr)
-            wt = github_data.get('_weapons_text', '')
-            if wt:
-                webflow_fields['weapons'] = wt
             sl = github_data.get('_stockpile_limit')
             if sl is not None:
                 webflow_fields['stockpile-limit'] = int(sl)

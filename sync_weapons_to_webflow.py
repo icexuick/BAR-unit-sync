@@ -387,10 +387,14 @@ class WeaponParser:
             overpenetrate = False
             area_onhit_damage = None
             area_onhit_time = None
+            is_bogus = False  # Parse bogus flag
             wcp_match = re.search(r'\bcustomparams\s*=\s*\{', wblock, re.IGNORECASE)
             if wcp_match:
                 wcp_block = LuaParser.extract_balanced_braces(wblock, wcp_match.end() - 1)
                 if wcp_block:
+                    # Bogus flag
+                    if re.search(r'\bbogus\s*=\s*1', wcp_block, re.IGNORECASE):
+                        is_bogus = True
                     # Stockpile limit
                     sl_match = re.search(r'\bstockpilelimit\s*=\s*([0-9]+)', wcp_block, re.IGNORECASE)
                     if sl_match:
@@ -448,6 +452,7 @@ class WeaponParser:
                 '_area_onhit_time': area_onhit_time,  # Napalm DOT duration
                 '_spark_forkdamage': spark_forkdamage,  # Lightning chain damage multiplier
                 '_spark_maxunits': spark_maxunits,  # Lightning chain max targets
+                '_is_bogus': is_bogus,  # Bogus/dummy weapon flag
                 
                 # Damage stats
                 'dps': 0,  # Calculated later
@@ -484,6 +489,7 @@ class WeaponParser:
                 'stockpile_time': int(_val(wblock, 'stockpiletime', float) or 0),
                 
                 # Special properties
+                'impact_only': _bool(wblock, 'impactonly'),
                 'paralyzer': _bool(wblock, 'paralyzer'),
                 'paralyze_duration': int(_val(wblock, 'paralyzetime', float) or 0),
                 'homing': _bool(wblock, 'tracks'),
@@ -517,70 +523,79 @@ class WeaponParser:
             weapon = weapondefs_dict[weapondef_key].copy()
             weapon['weapon_count'] = count
             
-            # Calculate DPS (only main projectile damage)
-            dmg = max(weapon['damage_vtol'], weapon['damage_default'])
-            dot_dps = 0  # Damage Over Time from cluster/napalm
-            
-            # Check if this is a cluster weapon
-            if weapon.get('_cluster_number') and weapon.get('_cluster_def'):
-                cluster_num = weapon['_cluster_number']
-                cluster_def_key = weapon['_cluster_def'].upper()
-                
-                # Try to find cluster def weapondef (not in weapons array!)
-                if cluster_def_key in weapondefs_dict:
-                    cluster_def_data = weapondefs_dict[cluster_def_key]
-                    cluster_dmg = cluster_def_data.get('damage_default', 0)
-                    
-                    # Cluster DOT = (cluster_number × cluster_damage) / reload
-                    # This is the extra damage from cluster projectiles AFTER main impact
-                    cluster_total = cluster_num * cluster_dmg
-                    dot_dps = (cluster_total / weapon['reload_time']) * weapon['_salvosize'] * weapon['burst'] * weapon['projectiles']
-                    
-                    # Store cluster info
-                    weapon['_has_cluster'] = True
-                    weapon['_cluster_child_damage'] = cluster_dmg
-                else:
-                    weapon['_has_cluster'] = False
-            
-            # Check for napalm DOT
-            if weapon.get('_area_onhit_damage') and weapon.get('_area_onhit_time'):
-                # Napalm DOT = (area_damage × area_time) / reload
-                # This is the extra damage from burning AFTER main impact
-                napalm_total = weapon['_area_onhit_damage'] * weapon['_area_onhit_time']
-                napalm_dot = (napalm_total / weapon['reload_time']) * weapon['_salvosize'] * weapon['burst'] * weapon['projectiles']
-                
-                # Add to DOT (could have both cluster AND napalm theoretically)
-                dot_dps += napalm_dot
-                weapon['_has_napalm'] = True
-            
-            # Check for lightning chain damage
-            if weapon.get('_spark_forkdamage') and weapon.get('_spark_maxunits'):
-                # Lightning DOT = (default_damage × burst × spark_forkdamage × spark_maxunits) / reload
-                # This is the chain lightning damage to secondary targets
-                base_dmg = weapon['damage_default']
-                fork_dmg_per_target = base_dmg * weapon['burst'] * weapon['_spark_forkdamage']
-                total_fork_dmg = fork_dmg_per_target * weapon['_spark_maxunits']
-                lightning_dot = (total_fork_dmg / weapon['reload_time']) * weapon['_salvosize'] * weapon['projectiles']
-                
-                # Add to DOT
-                dot_dps += lightning_dot
-                weapon['_has_lightning_chain'] = True
-            
-            # Calculate main projectile DPS (without DOT)
-            if dmg > 0 and weapon['reload_time'] > 0:
-                main_dps = (dmg * (1.0 / weapon['reload_time'])) * weapon['_salvosize'] * weapon['burst'] * weapon['projectiles']
-                weapon['dps'] = int(round(main_dps))
-                weapon['dot'] = int(round(dot_dps)) if dot_dps > 0 else 0
-            else:
+            # Skip DPS/DOT calculation for paralyzer weapons (EMP)
+            # They do paralysis, not real damage
+            if weapon.get('paralyzer', False):
                 weapon['dps'] = 0
                 weapon['dot'] = 0
+                # Continue to include weapon in list (but with 0 DPS)
+            else:
+                # Calculate DPS (only main projectile damage)
+                dmg = max(weapon['damage_vtol'], weapon['damage_default'])
+                dot_dps = 0  # Damage Over Time from cluster/napalm/lightning
+                
+                # Check if this is a cluster weapon
+                if weapon.get('_cluster_number') and weapon.get('_cluster_def'):
+                    cluster_num = weapon['_cluster_number']
+                    cluster_def_key = weapon['_cluster_def'].upper()
+                    
+                    # Try to find cluster def weapondef (not in weapons array!)
+                    if cluster_def_key in weapondefs_dict:
+                        cluster_def_data = weapondefs_dict[cluster_def_key]
+                        cluster_dmg = cluster_def_data.get('damage_default', 0)
+                        
+                        # Cluster DOT = (cluster_number × cluster_damage) / reload
+                        # This is the extra damage from cluster projectiles AFTER main impact
+                        cluster_total = cluster_num * cluster_dmg
+                        dot_dps = (cluster_total / weapon['reload_time']) * weapon['_salvosize'] * weapon['burst'] * weapon['projectiles']
+                        
+                        # Store cluster info
+                        weapon['_has_cluster'] = True
+                        weapon['_cluster_child_damage'] = cluster_dmg
+                    else:
+                        weapon['_has_cluster'] = False
+                
+                # Check for napalm DOT
+                if weapon.get('_area_onhit_damage') and weapon.get('_area_onhit_time'):
+                    # Napalm DOT = (area_damage × area_time) / reload
+                    # This is the extra damage from burning AFTER main impact
+                    napalm_total = weapon['_area_onhit_damage'] * weapon['_area_onhit_time']
+                    napalm_dot = (napalm_total / weapon['reload_time']) * weapon['_salvosize'] * weapon['burst'] * weapon['projectiles']
+                    
+                    # Add to DOT (could have both cluster AND napalm theoretically)
+                    dot_dps += napalm_dot
+                    weapon['_has_napalm'] = True
+                
+                # Check for lightning chain damage
+                if weapon.get('_spark_forkdamage') and weapon.get('_spark_maxunits'):
+                    # Lightning DOT = (default_damage × burst × spark_forkdamage × spark_maxunits) / reload
+                    # This is the chain lightning damage to secondary targets
+                    base_dmg = weapon['damage_default']
+                    fork_dmg_per_target = base_dmg * weapon['burst'] * weapon['_spark_forkdamage']
+                    total_fork_dmg = fork_dmg_per_target * weapon['_spark_maxunits']
+                    lightning_dot = (total_fork_dmg / weapon['reload_time']) * weapon['_salvosize'] * weapon['projectiles']
+                    
+                    # Add to DOT
+                    dot_dps += lightning_dot
+                    weapon['_has_lightning_chain'] = True
+                
+                # Calculate main projectile DPS (without DOT)
+                if dmg > 0 and weapon['reload_time'] > 0:
+                    main_dps = (dmg * (1.0 / weapon['reload_time'])) * weapon['_salvosize'] * weapon['burst'] * weapon['projectiles']
+                    weapon['dps'] = int(round(main_dps))
+                    weapon['dot'] = int(round(dot_dps)) if dot_dps > 0 else 0
+                else:
+                    weapon['dps'] = 0
+                    weapon['dot'] = 0
             
             # Skip weapons with no damage at all (default, vtol, subs, commanders all zero)
             total_damage = weapon['damage_default'] + weapon['damage_vtol'] + weapon['damage_subs'] + weapon['damage_commanders']
             if total_damage <= 0:
                 continue
             
-            # Skip if weapon name contains 'bogus' or 'mine'
+            # Skip if bogus flag is set OR weapon name contains 'bogus' or 'mine'
+            if weapon.get('_is_bogus', False):
+                continue
             if 'bogus' in weapon['weapondef_key'].lower() or 'mine' in weapon['weapondef_key'].lower():
                 continue
             
@@ -649,6 +664,16 @@ class WeaponCategoryDetector:
         if is_cluster:
             return self.category_map.get('cluster-plasma-cannon')
         
+        # Sniper detection (CHECK BEFORE GENERAL WEAPON TYPES)
+        # Indicators: impactonly=true + weaponvelocity > 2500 + damage_default >= 2000
+        # Name "sniper"/"snipe" in weapondef key or full_name is an extra signal
+        is_sniper = False
+        if weapon.get('impact_only', False) and weapon.get('velocity', 0) > 2500 and weapon.get('damage_default', 0) >= 2000:
+            is_sniper = True
+
+        if is_sniper:
+            return self.category_map.get('sniper')
+
         # Railgun detection (MUST CHECK FIRST before LaserCannon)
         # Multiple indicators: weapondef name, overpenetrate, LaserCannon type
         is_railgun = False
@@ -916,12 +941,20 @@ class WeaponSyncService:
             existing = existing_lookup.get(weapon_name)
             
             if dry_run:
+                # Resolve category slug name for display
+                category_slug = None
+                if category_id and self.category_detector:
+                    for slug, cid in self.category_detector.category_map.items():
+                        if cid == category_id:
+                            category_slug = slug
+                            break
+                cat_label = f"category={category_slug}" if category_slug else "category=None"
                 if existing:
-                    print(f"       🔍 Would update existing weapon")
+                    print(f"       🔍 Would update existing weapon [{cat_label}]")
                     if publish:
                         print(f"       🔍 Would publish")
                 else:
-                    print(f"       🔍 Would create new weapon")
+                    print(f"       🔍 Would create new weapon [{cat_label}]")
                     if publish:
                         print(f"       🔍 Would publish")
                 weapon_ids.append("dry-run-id")
