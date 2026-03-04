@@ -91,12 +91,16 @@ FIELD_MAPPING = {
     "metalcost": "metal-cost",
     "buildtime": "build-cost",
     "energymake": "energy-make",
+    "metalmake": "metal-create",
+    "metalstorage": "metal-storage",
+    "energystorage": "energy-storage",
     "workertime": "buildpower",
     "health": "health",
     "speed": "speed",
     "sightdistance": "sightrange",
     "radardistance": "radarrange",
-    "sonardistance": "metal-make",  # Note: Sonarrange field has slug "metal-make"
+    "sonardistance": "metal-make",  # Note: Field was renamed, slug is still "metal-make"
+    "seismicdistance": "seismic-detector-range",
     "jammerdistance": "jammerrange",
     "mass": "mass",
     "cloakcost": "cloak-cost",
@@ -105,6 +109,8 @@ FIELD_MAPPING = {
     # - paralyzemultiplier (in customparams)
     # - techlevel (in customparams)
     # - amphibious (derived from movement type)
+    # - energyconv_capacity (in customparams) → converter-metal-make
+    # - energyconv_efficiency (in customparams) → converter-efficiency
 }
 
 # Fields to skip (weapon-related, managed manually)
@@ -304,6 +310,41 @@ class GitHubUnitFetcher:
             return None
 
 
+def resolve_target_categories(onlytargetcategory: str) -> dict:
+    """
+    Convert onlytargetcategory string to surface/air/subs booleans.
+    
+    Known values:
+      NOTSUB       → surface=True,  air=True,  subs=False
+      NOTAIR       → surface=True,  air=False, subs=True
+      VTOL         → surface=False, air=True,  subs=False
+      SURFACE      → surface=True,  air=False, subs=False
+      EMPABLE      → surface=True,  air=False, subs=False  (same as SURFACE)
+      CANBEUWUNDERWATER / UNDERWATER → surface=False, air=False, subs=True
+      GROUNDSCOUT  → surface=True,  air=False, subs=False
+      None / ''    → surface=False, air=False, subs=False  (no target info)
+    """
+    FALSE_ALL = {'can_target_surface': False, 'can_target_air': False, 'can_target_subs': False}
+    if not onlytargetcategory:
+        return FALSE_ALL
+    
+    otc = onlytargetcategory.upper().replace(' ', '')
+    
+    mapping = {
+        'NOTSUB':              {'can_target_surface': True,  'can_target_air': True,  'can_target_subs': False},
+        'NOTAIR':              {'can_target_surface': True,  'can_target_air': False, 'can_target_subs': True},
+        'VTOL':                {'can_target_surface': False, 'can_target_air': True,  'can_target_subs': False},
+        'SURFACE':             {'can_target_surface': True,  'can_target_air': False, 'can_target_subs': False},
+        'EMPABLE':             {'can_target_surface': True,  'can_target_air': False, 'can_target_subs': False},
+        'CANBEUWUNDERWATER':   {'can_target_surface': False, 'can_target_air': False, 'can_target_subs': True},
+        'UNDERWATER':          {'can_target_surface': False, 'can_target_air': False, 'can_target_subs': True},
+        'NOTHOVER':            {'can_target_surface': False, 'can_target_air': False, 'can_target_subs': True},
+        'GROUNDSCOUT':         {'can_target_surface': True,  'can_target_air': False, 'can_target_subs': False},
+    }
+    
+    return mapping.get(otc, FALSE_ALL)
+
+
 class LuaParser:
     """Parses Lua unit definition files."""
     
@@ -344,6 +385,7 @@ class LuaParser:
         result = {
             'dps':           0,
             'dot':           0,  # Damage Over Time (cluster/napalm)
+            'pps':           0,  # Paralyse Per Second (EMP weapons)
             'weaponrange':   0,
             'weapons_text':  '',
             'has_weapondefs': False,
@@ -404,6 +446,7 @@ class LuaParser:
 
             # Check customparams { bogus = 1, stockpilelimit = X, cluster_number, cluster_def, area_onhit, spark } inside this weapondef
             is_bogus_cp = False
+            smart_backup = False  # Alternative fire mode flag
             stockpile_limit = None
             cluster_number = None
             cluster_def = None
@@ -421,12 +464,16 @@ class LuaParser:
             if cd_match_root:
                 cluster_def = cd_match_root.group(1)
             
+            sweepfire = 1  # Sweepfire beam multiplier (default 1 = no sweep)
             wcp_match = re.search(r'\bcustomparams\s*=\s*\{', wblock, re.IGNORECASE)
             if wcp_match:
                 wcp_block = LuaParser.extract_balanced_braces(wblock, wcp_match.end() - 1)
                 if wcp_block:
                     if re.search(r'\bbogus\s*=\s*1', wcp_block, re.IGNORECASE):
                         is_bogus_cp = True
+                    # Smart_backup flag (alternative fire mode - don't count in unit DPS)
+                    if re.search(r'\bsmart_backup\s*=\s*true', wcp_block, re.IGNORECASE):
+                        smart_backup = True
                     # Extract stockpilelimit
                     sl_match = re.search(r'\bstockpilelimit\s*=\s*([0-9]+)', wcp_block, re.IGNORECASE)
                     if sl_match:
@@ -456,6 +503,10 @@ class LuaParser:
                         sm_match_cp = re.search(r'\bspark_maxunits\s*=\s*["\']?([0-9]+)["\']?', wcp_block, re.IGNORECASE)
                         if sm_match_cp:
                             spark_maxunits = int(sm_match_cp.group(1))
+                    # Sweepfire multiplier
+                    sw_match = re.search(r'\bsweepfire\s*=\s*([0-9]+)', wcp_block, re.IGNORECASE)
+                    if sw_match:
+                        sweepfire = int(sw_match.group(1))
 
             weapondefs[wname.upper()] = {
                 'def_name':      (_val(wblock, 'name') or '').lower(),
@@ -467,6 +518,7 @@ class LuaParser:
                 'range':         _val(wblock, 'range',      float) or 0.0,
                 'paralyzer':     is_paralyzer,
                 'is_bogus':      is_bogus_cp,
+                'smart_backup':  smart_backup,  # Alternative fire mode flag
                 'stockpile_limit': stockpile_limit,
                 'impulsefactor': _val(wblock, 'impulsefactor', float) or 0.0,
                 'areaofeffect':  _val(wblock, 'areaofeffect',  float) or 0.0,
@@ -480,16 +532,29 @@ class LuaParser:
                 'area_onhit_time': area_onhit_time,
                 'spark_forkdamage': spark_forkdamage,
                 'spark_maxunits': spark_maxunits,
+                'sweepfire':      sweepfire,
             }
 
         # ── Step 2: parse weapons = { } to find which weapondefs are used ─────
         used_defs: List[str] = []
+        weapon_onlytarget: dict = {}  # def_name_upper -> onlytargetcategory string or None
         w_match = re.search(r'\bweapons\s*=\s*\{', unit_block, re.IGNORECASE)
         if w_match:
             w_block = LuaParser.extract_balanced_braces(unit_block, w_match.end() - 1)
             if w_block:
-                for dm in re.finditer(r'\bdef\s*=\s*["\']?(\w+)["\']?', w_block, re.IGNORECASE):
-                    used_defs.append(dm.group(1).upper())
+                # Parse each numbered weapon entry [N] = { ... }
+                for entry_match in re.finditer(r'\[\d+\]\s*=\s*\{', w_block):
+                    entry_block = LuaParser.extract_balanced_braces(w_block, entry_match.end() - 1)
+                    if not entry_block:
+                        continue
+                    def_m = re.search(r'\bdef\s*=\s*["\']?(\w+)["\']?', entry_block, re.IGNORECASE)
+                    if not def_m:
+                        continue
+                    def_name = def_m.group(1).upper()
+                    used_defs.append(def_name)
+                    # Read onlytargetcategory for this entry
+                    otc_m = re.search(r'\bonlytargetcategory\s*=\s*["\']?(\w+)["\']?', entry_block, re.IGNORECASE)
+                    weapon_onlytarget[def_name] = otc_m.group(1).upper() if otc_m else None
 
         # If there's no weapons = {} block at all, nothing is actually equipped
         if not used_defs:
@@ -521,16 +586,41 @@ class LuaParser:
 
             wtype = wd['weapontype']
 
-            # Skip paralyzer weapons (EMP) from DPS calculation - they don't do real damage
-            # But DO continue to track them for other stats (range, etc)
+            # Handle paralyzer weapons (EMP) - they don't do real damage
+            # But they SHOULD appear in weapon list with EMP prefix
             if wd.get('paralyzer', False):
                 # Track range even for paralyzer weapons
                 if wd['range'] > weapon_range:
                     weapon_range = wd['range']
-                continue  # Skip DPS calculation
+                
+                # Calculate PPS (Paralyse Per Second)
+                # PPS = damage / reload (how much paralysis damage per second)
+                dmg = wd['dmg_vtol'] if wd['dmg_vtol'] > wd['dmg_default'] else wd['dmg_default']
+                if dmg > 0:
+                    reload = wd['reloadtime'] or 1.0
+                    paralyze_dps = (dmg * (1.0 / reload)) * wd['salvosize'] * wd['burst'] * wd['projectiles']
+                    result['pps'] += paralyze_dps
+                
+                # Add to weapon_table with EMP prefix
+                emp_map = {
+                    'BeamLaser':          'EMP-BeamLaser',
+                    'AircraftBomb':       'EMP-AircraftBomb',
+                    'StarburstLauncher':  'EMP-StarburstLauncher',
+                    'LightningCannon':    'EMP-LightningCannon',
+                }
+                emp_wtype = emp_map.get(wtype, f'EMP-{wtype}')
+                weapon_table[emp_wtype] = weapon_table.get(emp_wtype, 0) + 1
+                
+                # Skip normal DPS calculation
+                continue
             
             # Mark that we have at least one non-paralyzer weapon
             has_non_paralyzer = True
+
+            # Skip smart_backup weapons (alternative fire modes) entirely
+            # They are just alternative modes of the main weapon and shouldn't be synced
+            if wd.get('smart_backup', False):
+                continue
 
             # Pick higher damage tier (vtol vs default) — mirrors Lua logic
             dmg = wd['dmg_vtol'] if wd['dmg_vtol'] > wd['dmg_default'] else wd['dmg_default']
@@ -549,6 +639,10 @@ class LuaParser:
             # Skip if no main damage (regardless of paralyzer or bogus flag)
             if dmg <= 0:
                 continue
+
+            # Apply sweepfire multiplier to damage (display + DPS)
+            if wd.get('sweepfire', 1) > 1:
+                dmg = dmg * wd['sweepfire']
 
             # Calculate main projectile DPS (WITHOUT cluster/napalm)
             reload = wd['reloadtime'] or 1.0
@@ -587,23 +681,26 @@ class LuaParser:
             if wd['areaofeffect'] > max_areaofeffect:
                 max_areaofeffect = wd['areaofeffect']
             
-            # Detect target capabilities
-            if wd['dmg_default'] > 0:
-                result['can_target_surface'] = True
-            if wd['dmg_vtol'] > 0:
-                result['can_target_air'] = True
-            if wd['dmg_subs'] > 0:
-                result['can_target_subs'] = True
+            # Detect target capabilities from onlytargetcategory
+            # Bogus/dummy weapons → all False
+            is_bogus_weapon = (
+                wd.get('is_bogus', False) or
+                'bogus' in def_key.lower() or
+                'dummy' in (wd.get('def_name', '') or '').lower()
+            )
+            has_damage = (wd['dmg_default'] > 0 or wd['dmg_vtol'] > 0 or wd['dmg_subs'] > 0)
+            
+            if not is_bogus_weapon and has_damage:
+                otc = weapon_onlytarget.get(def_key)
+                targets = resolve_target_categories(otc)
+                if targets['can_target_surface']:
+                    result['can_target_surface'] = True
+                if targets['can_target_air']:
+                    result['can_target_air'] = True
+                if targets['can_target_subs']:
+                    result['can_target_subs'] = True
 
-            # Add EMP prefix to paralyzer weapons in the weapon list
-            if wd['paralyzer']:
-                emp_map = {
-                    'BeamLaser':          'EMP-BeamLaser',
-                    'AircraftBomb':       'EMP-AircraftBomb',
-                    'StarburstLauncher':  'EMP-StarburstLauncher',
-                }
-                wtype = emp_map.get(wtype, f'EMP-{wtype}')
-
+            # Add to weapon_table (paralyzer weapons already added above with EMP prefix)
             weapon_table[wtype] = weapon_table.get(wtype, 0) + 1
 
         # ── Step 4: build weapons text ────────────────────────────────────────
@@ -710,6 +807,7 @@ class LuaParser:
             if weapon_result['has_weapondefs']:
                 unit_data['_dps']              = weapon_result['dps']
                 unit_data['_dot']              = weapon_result['dot']  # Damage Over Time
+                unit_data['_pps']              = weapon_result['pps']  # Paralyse Per Second
                 unit_data['_weaponrange']      = weapon_result['weaponrange']
                 unit_data['_weapons_text']     = weapon_result['weapons_text']
                 unit_data['_stockpile_limit']  = weapon_result['stockpile_limit']
@@ -752,6 +850,21 @@ class LuaParser:
                     value = False
                 
                 unit_data[key] = value
+            
+            # Parse customparams for energyconv (metal makers)
+            cp_match = re.search(r'\bcustomparams\s*=\s*\{', unit_block, re.IGNORECASE)
+            if cp_match:
+                cp_block = LuaParser.extract_balanced_braces(unit_block, cp_match.end() - 1)
+                if cp_block:
+                    # Energy conversion capacity (metal make rate)
+                    ecc_match = re.search(r'\benergyconv_capacity\s*=\s*([0-9.]+)', cp_block, re.IGNORECASE)
+                    if ecc_match:
+                        unit_data['energyconv_capacity'] = float(ecc_match.group(1))
+                    
+                    # Energy conversion efficiency
+                    ece_match = re.search(r'\benergyconv_efficiency\s*=\s*([0-9.]+)', cp_block, re.IGNORECASE)
+                    if ece_match:
+                        unit_data['energyconv_efficiency'] = float(ece_match.group(1))
             
             return unit_data
             
@@ -1756,7 +1869,8 @@ class UnitSyncService:
                 # Integer fields
                 if webflow_key in ["energy-cost", "metal-cost", "build-cost", "energy-make", 
                                    "buildpower", "health", "speed", "sightrange", "radarrange", 
-                                   "metal-make", "jammerrange", "mass", "cloak-cost"]:
+                                   "metal-make", "jammerrange", "mass", "cloak-cost", 
+                                   "metal-storage", "energy-storage", "seismic-detector-range"]:
                     try:
                         # Convert to int if it's a number
                         if isinstance(value, (int, float)):
@@ -1764,7 +1878,28 @@ class UnitSyncService:
                     except:
                         pass
                 
+                # Decimal fields
+                elif webflow_key in ["metal-create", "converter-metal-make", "converter-efficiency"]:
+                    try:
+                        if isinstance(value, (int, float)):
+                            value = float(value)
+                    except:
+                        pass
+                
                 webflow_fields[webflow_key] = value
+        
+        # Handle seismicdistance: only send if > 0
+        # (overrides any 0 value that may have been set by the loop above)
+        if 'seismicdistance' in github_data:
+            seismic_val = github_data['seismicdistance']
+            try:
+                seismic_val = int(float(seismic_val))
+            except:
+                seismic_val = 0
+            if seismic_val > 0:
+                webflow_fields['seismic-detector-range'] = seismic_val
+            else:
+                webflow_fields.pop('seismic-detector-range', None)
         
         # Handle paralyzemultiplier separately (from customparams, decimal field)
         if 'paralyzemultiplier' in github_data:
@@ -1777,6 +1912,20 @@ class UnitSyncService:
         if 'techlevel' in github_data:
             try:
                 webflow_fields['techlevel'] = int(github_data['techlevel'])
+            except:
+                pass
+        
+        # Handle energyconv_capacity (from customparams, decimal field)
+        if 'energyconv_capacity' in github_data:
+            try:
+                webflow_fields['converter-metal-make'] = float(github_data['energyconv_capacity'])
+            except:
+                pass
+        
+        # Handle energyconv_efficiency (from customparams, decimal field)
+        if 'energyconv_efficiency' in github_data:
+            try:
+                webflow_fields['converter-efficiency'] = float(github_data['energyconv_efficiency'])
             except:
                 pass
         
@@ -1812,6 +1961,9 @@ class UnitSyncService:
         dot = github_data.get('_dot', 0)
         webflow_fields['dot'] = int(dot) if dot else 0
         
+        pps = github_data.get('_pps', 0)
+        webflow_fields['pps'] = int(pps) if pps else 0
+        
         # Always sync weaponrange (even if 0) to clear old values
         wr = github_data.get('_weaponrange', 0)
         webflow_fields['weaponrange'] = int(wr) if wr else 0
@@ -1824,6 +1976,7 @@ class UnitSyncService:
         print(f"  🔧 DEBUG Webflow fields:")
         print(f"     dps: {webflow_fields.get('dps', 'NOT SET')}")
         print(f"     dot: {webflow_fields.get('dot', 'NOT SET')}")
+        print(f"     pps: {webflow_fields.get('pps', 'NOT SET')}")
         print(f"     weaponrange: {webflow_fields.get('weaponrange', 'NOT SET')}")
         print(f"     weapons: '{webflow_fields.get('weapons', 'NOT SET')}'")
         

@@ -228,6 +228,45 @@ class WebflowAPI:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# TARGET CATEGORY RESOLUTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def resolve_target_categories(onlytargetcategory: str) -> dict:
+    """
+    Convert onlytargetcategory string to surface/air/subs booleans.
+    
+    Known values:
+      NOTSUB       → surface=True,  air=True,  subs=False
+      NOTAIR       → surface=True,  air=False, subs=True
+      VTOL         → surface=False, air=True,  subs=False
+      SURFACE      → surface=True,  air=False, subs=False
+      EMPABLE      → surface=True,  air=False, subs=False  (same as SURFACE)
+      CANBEUWUNDERWATER / UNDERWATER → surface=False, air=False, subs=True
+      GROUNDSCOUT  → surface=True,  air=False, subs=False
+      None / ''    → surface=False, air=False, subs=False  (no target info)
+    """
+    FALSE_ALL = {'can_target_surface': False, 'can_target_air': False, 'can_target_subs': False}
+    if not onlytargetcategory:
+        return FALSE_ALL
+    
+    otc = onlytargetcategory.upper().replace(' ', '')
+    
+    mapping = {
+        'NOTSUB':              {'can_target_surface': True,  'can_target_air': True,  'can_target_subs': False},
+        'NOTAIR':              {'can_target_surface': True,  'can_target_air': False, 'can_target_subs': True},
+        'VTOL':                {'can_target_surface': False, 'can_target_air': True,  'can_target_subs': False},
+        'SURFACE':             {'can_target_surface': True,  'can_target_air': False, 'can_target_subs': False},
+        'EMPABLE':             {'can_target_surface': True,  'can_target_air': False, 'can_target_subs': False},
+        'CANBEUWUNDERWATER':   {'can_target_surface': False, 'can_target_air': False, 'can_target_subs': True},
+        'UNDERWATER':          {'can_target_surface': False, 'can_target_air': False, 'can_target_subs': True},
+        'NOTHOVER':            {'can_target_surface': False, 'can_target_air': False, 'can_target_subs': True},
+        'GROUNDSCOUT':         {'can_target_surface': True,  'can_target_air': False, 'can_target_subs': False},
+    }
+    
+    return mapping.get(otc, FALSE_ALL)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # WEAPON PARSING
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -296,6 +335,10 @@ class WeaponParser:
         dmg_block = LuaParser.extract_balanced_braces(wblock, dmg_match.end() - 1)
         if not dmg_block:
             return damage
+        
+        # Strip Lua comments BEFORE parsing — otherwise commented-out values
+        # like --vtol = 400 would still be matched by the regex
+        dmg_block = re.sub(r'--[^\n]*', '', dmg_block)
         
         # Extract each damage type
         for dtype in ['default', 'commanders', 'vtol', 'subs']:
@@ -388,6 +431,10 @@ class WeaponParser:
             area_onhit_damage = None
             area_onhit_time = None
             is_bogus = False  # Parse bogus flag
+            is_nuclear = False  # Nuclear missile flag (customparams)
+            nofire = False  # Parse nofire flag (crush/stomp indicator)
+            smart_backup = False  # Parse smart_backup (alternative fire mode)
+            sweepfire = 1  # Sweepfire multiplier (default 1 = no sweep)
             wcp_match = re.search(r'\bcustomparams\s*=\s*\{', wblock, re.IGNORECASE)
             if wcp_match:
                 wcp_block = LuaParser.extract_balanced_braces(wblock, wcp_match.end() - 1)
@@ -395,6 +442,14 @@ class WeaponParser:
                     # Bogus flag
                     if re.search(r'\bbogus\s*=\s*1', wcp_block, re.IGNORECASE):
                         is_bogus = True
+                    if re.search(r'\bnuclear\s*=\s*1', wcp_block, re.IGNORECASE):
+                        is_nuclear = True
+                    # Nofire flag (crush/stomp melee indicator)
+                    if re.search(r'\bnofire\s*=\s*true', wcp_block, re.IGNORECASE):
+                        nofire = True
+                    # Smart_backup flag (alternative fire mode - don't count in unit DPS)
+                    if re.search(r'\bsmart_backup\s*=\s*true', wcp_block, re.IGNORECASE):
+                        smart_backup = True
                     # Stockpile limit
                     sl_match = re.search(r'\bstockpilelimit\s*=\s*([0-9]+)', wcp_block, re.IGNORECASE)
                     if sl_match:
@@ -425,6 +480,11 @@ class WeaponParser:
                     if cn_match and not cluster_number:
                         cluster_number = int(cn_match.group(1))
                     
+                    # Sweepfire multiplier (weapon fires N beams simultaneously)
+                    sw_match = re.search(r'\bsweepfire\s*=\s*([0-9]+)', wcp_block, re.IGNORECASE)
+                    if sw_match:
+                        sweepfire = int(sw_match.group(1))
+
                     # Cluster def (name of child weapondef)
                     cd_match = re.search(r'\bcluster_def\s*=\s*["\']?(\w+)["\']?', wcp_block, re.IGNORECASE)
                     if cd_match and not cluster_def:
@@ -453,6 +513,10 @@ class WeaponParser:
                 '_spark_forkdamage': spark_forkdamage,  # Lightning chain damage multiplier
                 '_spark_maxunits': spark_maxunits,  # Lightning chain max targets
                 '_is_bogus': is_bogus,  # Bogus/dummy weapon flag
+                '_is_nuclear': is_nuclear,  # Nuclear missile flag
+                '_sweepfire': sweepfire,  # Sweepfire beam multiplier
+                '_nofire': nofire,  # Nofire flag (crush/stomp melee indicator)
+                '_smart_backup': smart_backup,  # Smart backup (alternative fire mode)
                 
                 # Damage stats
                 'dps': 0,  # Calculated later
@@ -462,9 +526,11 @@ class WeaponParser:
                 'damage_subs': damage['subs'],
                 
                 # Target capabilities (detected from damage types)
-                'can_target_surface': damage['default'] > 0,  # Has default damage
-                'can_target_air': damage['vtol'] > 0,  # Has VTOL damage
-                'can_target_subs': damage['subs'] > 0,  # Has submarine damage
+                # Target capabilities: set to False here, resolved later from
+                # onlytargetcategory in the weapons = {} block (see below)
+                'can_target_surface': False,
+                'can_target_air': False,
+                'can_target_subs': False,
                 
                 # Weapon stats
                 'reload_time': round(_val(wblock, 'reloadtime', float) or 0, 5),
@@ -490,11 +556,21 @@ class WeaponParser:
                 
                 # Special properties
                 'impact_only': _bool(wblock, 'impactonly'),
+                'commandfire': _bool(wblock, 'commandfire'),
                 'paralyzer': _bool(wblock, 'paralyzer'),
                 'paralyze_duration': int(_val(wblock, 'paralyzetime', float) or 0),
                 'homing': _bool(wblock, 'tracks'),
                 'turn_rate': int(_val(wblock, 'turnrate', float) or 0),
                 'water_weapon': _bool(wblock, 'waterweapon'),
+                'beamtime': round(_val(wblock, 'beamtime', float) or 0, 5),
+                'large_beam_laser': _bool(wblock, 'largebeamlaser'),
+                
+                # Shield properties (for weapontype = Shield)
+                # Parse from shield = { } sub-block
+                'shield_power': 0,
+                'shield_power_regen': 0,
+                'shield_power_regen_energy': 0,
+                'shield_radius': 0,
                 
                 # Visual
                 'color': WeaponParser.parse_rgb_color(wblock) or '#ffffff',
@@ -503,17 +579,55 @@ class WeaponParser:
                 '_salvosize': int(_val(wblock, 'salvosize', float) or 1),
             }
             
+            # Parse shield = { } sub-block if weapontype is Shield
+            if weapon_data['weapon_type'] == 'Shield':
+                shield_match = re.search(r'\bshield\s*=\s*\{', wblock, re.IGNORECASE)
+                if shield_match:
+                    shield_block = LuaParser.extract_balanced_braces(wblock, shield_match.end() - 1)
+                    if shield_block:
+                        # Parse power, powerregen, powerregenenergy, radius
+                        power_match = re.search(r'\bpower\s*=\s*([0-9.]+)', shield_block, re.IGNORECASE)
+                        if power_match:
+                            weapon_data['shield_power'] = int(float(power_match.group(1)))
+                        
+                        regen_match = re.search(r'\bpowerregen\s*=\s*([0-9.]+)', shield_block, re.IGNORECASE)
+                        if regen_match:
+                            weapon_data['shield_power_regen'] = int(float(regen_match.group(1)))
+                        
+                        regen_energy_match = re.search(r'\bpowerregenenergy\s*=\s*([0-9.]+)', shield_block, re.IGNORECASE)
+                        if regen_energy_match:
+                            weapon_data['shield_power_regen_energy'] = int(float(regen_energy_match.group(1)))
+                        
+                        radius_match = re.search(r'\bradius\s*=\s*([0-9.]+)', shield_block, re.IGNORECASE)
+                        if radius_match:
+                            weapon_data['shield_radius'] = int(float(radius_match.group(1)))
+            
             weapondefs_dict[weapondef_key.upper()] = weapon_data
         
         # Now parse weapons = {} to find which weapondefs are actually used and count them
+        # Also read onlytargetcategory per weapon entry
         weapon_counts = {}
+        weapon_onlytarget = {}  # weapondef_name -> onlytargetcategory string
         w_match = re.search(r'\bweapons\s*=\s*\{', unit_block, re.IGNORECASE)
         if w_match:
             w_block = LuaParser.extract_balanced_braces(unit_block, w_match.end() - 1)
             if w_block:
-                for dm in re.finditer(r'\bdef\s*=\s*["\']?(\w+)["\']?', w_block, re.IGNORECASE):
-                    weapondef_name = dm.group(1).upper()
+                # Parse each numbered weapon entry [1] = { ... }
+                for entry_match in re.finditer(r'\[\d+\]\s*=\s*\{', w_block):
+                    entry_block = LuaParser.extract_balanced_braces(w_block, entry_match.end() - 1)
+                    if not entry_block:
+                        continue
+                    def_m = re.search(r'\bdef\s*=\s*["\']?(\w+)["\']?', entry_block, re.IGNORECASE)
+                    if not def_m:
+                        continue
+                    weapondef_name = def_m.group(1).upper()
                     weapon_counts[weapondef_name] = weapon_counts.get(weapondef_name, 0) + 1
+                    # Read onlytargetcategory for this entry
+                    otc_m = re.search(r'\bonlytargetcategory\s*=\s*["\']?(\w+)["\']?', entry_block, re.IGNORECASE)
+                    if otc_m:
+                        weapon_onlytarget[weapondef_name] = otc_m.group(1).upper()
+                    else:
+                        weapon_onlytarget[weapondef_name] = None
         
         # Build final weapons list with counts and DPS
         for weapondef_key, count in weapon_counts.items():
@@ -523,12 +637,52 @@ class WeaponParser:
             weapon = weapondefs_dict[weapondef_key].copy()
             weapon['weapon_count'] = count
             
-            # Skip DPS/DOT calculation for paralyzer weapons (EMP)
-            # They do paralysis, not real damage
-            if weapon.get('paralyzer', False):
+            # Resolve target capabilities from onlytargetcategory
+            # Bogus/dummy weapons get everything False regardless
+            is_bogus = (
+                weapon.get('_is_bogus', False) or
+                'bogus' in weapondef_key.lower() or
+                'dummy' in weapon.get('full_name', '').lower()
+            )
+            has_damage = weapon.get('damage_default', 0) > 0 or weapon.get('damage_vtol', 0) > 0 or weapon.get('damage_subs', 0) > 0
+            
+            if is_bogus or not has_damage:
+                # No real weapon - all targets False
+                targets = {'can_target_surface': False, 'can_target_air': False, 'can_target_subs': False}
+            else:
+                otc = weapon_onlytarget.get(weapondef_key)
+                targets = resolve_target_categories(otc)
+            
+            weapon.update(targets)
+            
+            # Apply sweepfire multiplier to damage_default (display value in Webflow)
+            if weapon.get('_sweepfire', 1) > 1:
+                weapon['damage_default'] = weapon['damage_default'] * weapon['_sweepfire']
+
+            # Skip DPS/DOT/PPS calculation for Shield weapons
+            # Shields have no damage - they only provide protection
+            if weapon.get('weapon_type') == 'Shield':
                 weapon['dps'] = 0
                 weapon['dot'] = 0
-                # Continue to include weapon in list (but with 0 DPS)
+                weapon['pps'] = 0
+                # Continue to include weapon in list (shields are valid weapons)
+            
+            # Skip DPS/DOT calculation for paralyzer weapons (EMP)
+            # They do paralysis, not real damage
+            elif weapon.get('paralyzer', False):
+                weapon['dps'] = 0
+                weapon['dot'] = 0
+                
+                # Calculate PPS (Paralyse Per Second) for paralyzer weapons
+                # PPS = damage / reload (how much paralysis damage per second)
+                dmg = max(weapon['damage_vtol'], weapon['damage_default'])
+                if dmg > 0 and weapon['reload_time'] > 0:
+                    pps = (dmg * (1.0 / weapon['reload_time'])) * weapon['_salvosize'] * weapon['burst'] * weapon['projectiles']
+                    weapon['pps'] = int(round(pps))
+                else:
+                    weapon['pps'] = 0
+                
+                # Continue to include weapon in list (but with 0 DPS, non-zero PPS)
             else:
                 # Calculate DPS (only main projectile damage)
                 dmg = max(weapon['damage_vtol'], weapon['damage_default'])
@@ -584,20 +738,42 @@ class WeaponParser:
                     main_dps = (dmg * (1.0 / weapon['reload_time'])) * weapon['_salvosize'] * weapon['burst'] * weapon['projectiles']
                     weapon['dps'] = int(round(main_dps))
                     weapon['dot'] = int(round(dot_dps)) if dot_dps > 0 else 0
+                    weapon['pps'] = 0  # Non-paralyzer weapons have 0 PPS
                 else:
                     weapon['dps'] = 0
                     weapon['dot'] = 0
+                    weapon['pps'] = 0
             
             # Skip weapons with no damage at all (default, vtol, subs, commanders all zero)
+            # EXCEPTION: Shield weapons (weapontype = Shield) have no damage but are valid
             total_damage = weapon['damage_default'] + weapon['damage_vtol'] + weapon['damage_subs'] + weapon['damage_commanders']
-            if total_damage <= 0:
+            is_shield = weapon['weapon_type'] == 'Shield'
+            
+            if total_damage <= 0 and not is_shield:
+                print(f"  ⏭️  Skipping {weapon['weapondef_key']}: no damage (total=0)")
                 continue
             
+            # Skip smart_backup weapons (alternative fire modes)
+            # These are just alternative modes of the main weapon
+            if weapon.get('_smart_backup', False):
+                print(f"  ⏭️  Skipping {weapon['weapondef_key']}: smart_backup=true")
+                continue
+            
+            # Check if this is a crush/stomp weapon BEFORE filtering bogus
+            # Crush/stomp: Cannon + range < 60 + nofire = true
+            is_crush_stomp = (weapon['weapon_type'] == 'Cannon' and 
+                            weapon['range'] < 60 and 
+                            weapon.get('_nofire', False))
+            
             # Skip if bogus flag is set OR weapon name contains 'bogus' or 'mine'
-            if weapon.get('_is_bogus', False):
-                continue
-            if 'bogus' in weapon['weapondef_key'].lower() or 'mine' in weapon['weapondef_key'].lower():
-                continue
+            # EXCEPTION: Don't skip crush/stomp weapons even if bogus
+            if not is_crush_stomp:
+                if weapon.get('_is_bogus', False):
+                    print(f"  ⏭️  Skipping {weapon['weapondef_key']}: bogus=1 (not crush/stomp)")
+                    continue
+                if 'bogus' in weapon['weapondef_key'].lower() or 'mine' in weapon['weapondef_key'].lower():
+                    print(f"  ⏭️  Skipping {weapon['weapondef_key']}: 'bogus' or 'mine' in name")
+                    continue
             
             weapons.append(weapon)
         
@@ -608,6 +784,187 @@ class WeaponParser:
 # WEAPON CATEGORY DETECTION
 # ══════════════════════════════════════════════════════════════════════════════
 
+    @staticmethod
+    def parse_mine_weapondef(file_content: str, unit_name: str, explodeas: str) -> Optional[Dict]:
+        """
+        Parse a mine explosion weapondef from a standalone weapons/xxx.lua file.
+        
+        These files have the weapondef at root level (not inside weapondefs = {}):
+            WeaponDefs = {
+                mine_light = {
+                    weapontype = "Cannon",
+                    ...
+                }
+            }
+        or sometimes just:
+            mine_light = {
+                weapontype = "Cannon",
+                ...
+            }
+        
+        Returns a weapon dict compatible with the normal weapon format.
+        """
+        if not file_content:
+            return None
+
+        # Strip Lua comments before parsing
+        content = re.sub(r'--[^\n]*', '', file_content)
+
+        weapondef_key = explodeas.lower()
+
+        def _val(block, key, cast=str):
+            m = re.search(rf'\b{key}\s*=\s*([^\n,}}]+)', block, re.IGNORECASE)
+            if not m:
+                return None
+            v = m.group(1).strip().rstrip(',').strip('"\'')
+            try:
+                return cast(v)
+            except (ValueError, TypeError):
+                return None
+
+        def _bool(block, key):
+            m = re.search(rf'\b{key}\s*=\s*(true|false)', block, re.IGNORECASE)
+            if m:
+                return m.group(1).lower() == 'true'
+            return False
+
+        # Find the weapondef block — try WeaponDefs = { name = { ... } } first
+        wblock = None
+        wd_match = re.search(r'\bWeaponDefs\s*=\s*\{', content, re.IGNORECASE)
+        if wd_match:
+            wd_outer = LuaParser.extract_balanced_braces(content, wd_match.end() - 1)
+            if wd_outer:
+                # Find the named weapondef inside
+                inner_match = re.search(rf'\b{re.escape(weapondef_key)}\s*=\s*\{{', wd_outer, re.IGNORECASE)
+                if inner_match:
+                    wblock = LuaParser.extract_balanced_braces(wd_outer, inner_match.end() - 1)
+
+        # Fallback: try root-level named block
+        if not wblock:
+            root_match = re.search(rf'\b{re.escape(weapondef_key)}\s*=\s*\{{', content, re.IGNORECASE)
+            if root_match:
+                wblock = LuaParser.extract_balanced_braces(content, root_match.end() - 1)
+
+        if not wblock:
+            print(f"  ⚠️  Could not find weapondef block '{weapondef_key}' in mine weapon file")
+            return None
+
+        # Parse damage block
+        damage = WeaponParser.parse_damage_block(wblock)
+
+        # Parse customparams (bogus, nofire, etc.)
+        is_bogus = False
+        wcp_match = re.search(r'\bcustomparams\s*=\s*\{', wblock, re.IGNORECASE)
+        if wcp_match:
+            wcp_block = LuaParser.extract_balanced_braces(wblock, wcp_match.end() - 1)
+            if wcp_block and re.search(r'\bbogus\s*=\s*1', wcp_block, re.IGNORECASE):
+                is_bogus = True
+
+        # Build weapon dict — same structure as normal weapons
+        weapon_data = {
+            'weapondef_key':    weapondef_key,
+            'name':             f"{unit_name}-{weapondef_key}",
+            'full_name':        _val(wblock, 'name') or weapondef_key,
+            'weapon_type':      _val(wblock, 'weapontype') or 'Unknown',
+
+            # Special flags
+            '_overpenetrate':   False,
+            '_interceptor':     False,
+            '_cluster_number':  None,
+            '_cluster_def':     None,
+            '_area_onhit_damage': None,
+            '_area_onhit_time': None,
+            '_spark_forkdamage': None,
+            '_spark_maxunits':  None,
+            '_is_bogus':        is_bogus,
+            '_nofire':          False,
+            '_smart_backup':    False,
+
+            # Damage
+            'dps':              0,
+            'dot':              0,
+            'pps':              0,
+            'damage_default':   damage['default'],
+            'damage_commanders': damage['commanders'],
+            'damage_vtol':      damage['vtol'],
+            'damage_subs':      damage['subs'],
+
+            # Target capabilities — resolved below from onlytargetcategory
+            'can_target_surface': False,
+            'can_target_air':   False,
+            'can_target_subs':  False,
+
+            # Weapon stats
+            'reload_time':      round(_val(wblock, 'reloadtime', float) or 0, 5),
+            'range':            int(_val(wblock, 'range', float) or 0),
+            'accuracy':         int(_val(wblock, 'accuracy', float) or 0),
+            'area_of_effect':   int(_val(wblock, 'areaofeffect', float) or 0),
+            'edge_effectiveness': round(_val(wblock, 'edgeeffectiveness', float) or 1.0, 2),
+            'impulse':          round(_val(wblock, 'impulsefactor', float) or 0, 2),
+
+            # Projectile stats
+            'projectiles':      int(_val(wblock, 'projectiles', float) or 1),
+            'velocity':         int(_val(wblock, 'weaponvelocity', float) or 0),
+            'burst':            int(_val(wblock, 'burst', float) or 1),
+
+            # Cost
+            'energy_per_shot':  int(_val(wblock, 'energypershot', float) or 0),
+            'metal_per_shot':   int(_val(wblock, 'metalpershot', float) or 0),
+
+            # Stockpile
+            'stockpile':        _bool(wblock, 'stockpile'),
+            'stockpile_limit':  None,
+            'stockpile_time':   int(_val(wblock, 'stockpiletime', float) or 0),
+
+            # Special properties
+            'impact_only':      _bool(wblock, 'impactonly'),
+            'commandfire':      _bool(wblock, 'commandfire'),
+            'paralyzer':        _bool(wblock, 'paralyzer'),
+            'paralyze_duration': int(_val(wblock, 'paralyzetime', float) or 0),
+            'homing':           _bool(wblock, 'tracks'),
+            'turn_rate':        int(_val(wblock, 'turnrate', float) or 0),
+            'water_weapon':     _bool(wblock, 'waterweapon'),
+            'beamtime':         round(_val(wblock, 'beamtime', float) or 0, 5),
+            'large_beam_laser': _bool(wblock, 'largebeamlaser'),
+
+            # Shield (mines won't have this but keep structure consistent)
+            'shield_power':     0,
+            'shield_power_regen': 0,
+            'shield_power_regen_energy': 0,
+            'shield_radius':    0,
+
+            # Visual
+            'color':            WeaponParser.parse_rgb_color(wblock) or '#ffffff',
+
+            # DPS calculation helper
+            '_salvosize':       int(_val(wblock, 'salvosize', float) or 1),
+
+            # Mine weapon has count 1
+            'weapon_count':     1,
+            '_is_mine':         True,   # Mark as mine explosion weapon
+        }
+
+        # Resolve onlytargetcategory — mine weapons don't have a weapons = {} block,
+        # so we read it directly from the weapondef block itself
+        otc_m = re.search(r'\bonlytargetcategory\s*=\s*["\']?(\w+)["\']?', wblock, re.IGNORECASE)
+        otc = otc_m.group(1).upper() if otc_m else None
+        targets = resolve_target_categories(otc)
+        weapon_data.update(targets)
+
+        # Calculate DPS
+        has_damage = damage['default'] > 0 or damage['vtol'] > 0 or damage['subs'] > 0
+        if has_damage and not is_bogus:
+            reload = weapon_data['reload_time'] or 1.0
+            dmg = damage['vtol'] if damage['vtol'] > damage['default'] else damage['default']
+            if dmg > 0:
+                weapon_data['dps'] = round(
+                    (dmg * (1.0 / reload)) * weapon_data['_salvosize'] * weapon_data['burst'] * weapon_data['projectiles'],
+                    1
+                )
+
+        print(f"  💣 Mine weapon: {weapon_data['full_name']} | type={weapon_data['weapon_type']} | DPS={weapon_data['dps']} | AOE={weapon_data['area_of_effect']}")
+        return weapon_data
+    
 class WeaponCategoryDetector:
     """Detect weapon category based on weapon stats."""
     
@@ -635,6 +992,11 @@ class WeaponCategoryDetector:
         weapondef_key = weapon.get('weapondef_key', '').lower()
         full_name = weapon.get('full_name', '').lower()
         
+        # Mine / Trigger Explosive (CHECK FIRST - absolute priority)
+        # These are explosion weapons from external weapons/ files
+        if weapon.get('_is_mine', False):
+            return self.category_map.get('trigger-explosive')
+        
         # Anti-Nuke detection (CHECK FIRST - highest priority)
         # Multiple indicators: interceptor flag, name indicators
         is_antinuke = False
@@ -645,6 +1007,25 @@ class WeaponCategoryDetector:
         
         if is_antinuke:
             return self.category_map.get('anti-nuke')
+        
+        # Crush / Stomp detection (CHECK EARLY - very specific melee)
+        # Criteria: weapontype=Cannon + range < 60 + nofire=true in customparams
+        is_crush = False
+        if (wtype == 'Cannon' and 
+            weapon.get('range', 0) < 60 and 
+            weapon.get('_nofire', False)):
+            is_crush = True
+        
+        # Debug for potential crush weapons
+        if wtype == 'Cannon' and weapon.get('range', 0) < 100:
+            print(f"  🔍 DEBUG Potential crush weapon: {weapondef_key}")
+            print(f"     weapontype: {wtype}")
+            print(f"     range: {weapon.get('range', 0)}")
+            print(f"     _nofire: {weapon.get('_nofire', False)}")
+            print(f"     is_crush: {is_crush}")
+        
+        if is_crush:
+            return self.category_map.get('crush-stomp')
         
         # Napalm Launcher detection (CHECK BEFORE CLUSTER)
         # Indicators: weapontype Cannon + area_onhit_damage + area_onhit_time
@@ -666,9 +1047,14 @@ class WeaponCategoryDetector:
         
         # Sniper detection (CHECK BEFORE GENERAL WEAPON TYPES)
         # Indicators: impactonly=true + weaponvelocity > 2500 + damage_default >= 2000
+        # Weapontype MUST be Cannon or LaserCannon
         # Name "sniper"/"snipe" in weapondef key or full_name is an extra signal
         is_sniper = False
-        if weapon.get('impact_only', False) and weapon.get('velocity', 0) > 2500 and weapon.get('damage_default', 0) >= 2000:
+        weapon_type = weapon.get('weapon_type', '')
+        if (weapon.get('impact_only', False) and 
+            weapon.get('velocity', 0) > 2500 and 
+            weapon.get('damage_default', 0) >= 2000 and
+            weapon_type in ['Cannon', 'LaserCannon']):
             is_sniper = True
 
         if is_sniper:
@@ -701,8 +1087,15 @@ class WeaponCategoryDetector:
         if wtype == 'LaserCannon' and is_water_weapon:
             return self.category_map.get('sea-laser-cannon')
         
+        # Tachyon Laser (CHECK BEFORE general BeamLaser)
+        # Criteria: BeamLaser + largebeamlaser = true + beamtime >= 0.3
+        if (wtype == 'BeamLaser' and
+                weapon.get('large_beam_laser', False) and
+                weapon.get('beamtime', 0) >= 0.3):
+            return self.category_map.get('tachyon-laser-beam')
+        
         # BeamLaser (both continuous and regular go to beam-laser)
-        # This must come AFTER heat ray check!
+        # This must come AFTER heat ray and tachyon laser checks!
         if wtype == 'BeamLaser':
             return self.category_map.get('beam-laser')
         
@@ -710,11 +1103,55 @@ class WeaponCategoryDetector:
         if wtype == 'MissileLauncher':
             return self.category_map.get('missile-launcher')
         
-        # Vertical Rocket Launcher (StarburstLauncher)
-        # This comes AFTER anti-nuke check!
+        # Nuclear Missile / Tactical Missile (CHECK BEFORE general StarburstLauncher)
+        # Criteria: StarburstLauncher + targetable=1 + commandfire=true
+        # Then split by damage: >= 8000 → nuclear-missile, < 8000 → tactical-missile
+        if (wtype == 'StarburstLauncher' and
+                weapon.get('_is_nuclear', False) and
+                weapon.get('commandfire', False)):
+            if weapon.get('damage_default', 0) >= 8000:
+                return self.category_map.get('nuclear-missile')
+            else:
+                return self.category_map.get('tactical-missile')
+
+        # Vertical Rocket Launcher (StarburstLauncher - general)
+        # This comes AFTER anti-nuke and nuclear missile checks!
         if wtype == 'StarburstLauncher':
             return self.category_map.get('vertical-rocket-launcher')
         
+        # Flak Cannon (CHECK BEFORE general Cannon and Plasma Repeater)
+        # Primary: Cannon + VTOL-only target + flak color (#ff54b2 = rgbcolor {1, 0.33, 0.7})
+        # Fallback: 'flak' in weapon name
+        # Supporting signal: aoe between 35-200
+        is_flak = False
+        if wtype == 'Cannon' and weapon.get('can_target_air', False):
+            flak_color = weapon.get('color', '').lower()
+            aoe = weapon.get('area_of_effect', 0)
+            has_flak_color = (flak_color == '#ff54b2')
+            has_flak_name  = ('flak' in full_name or 'flak' in weapondef_key)
+            has_flak_aoe   = (35 <= aoe <= 200)
+            # Match if color+aoe, or name alone is enough as fallback
+            if (has_flak_color and has_flak_aoe) or has_flak_name:
+                is_flak = True
+        
+        if is_flak:
+            return self.category_map.get('flak-cannon')
+        
+        # Plasma Repeater (CHECK BEFORE general Cannon)
+        # Criteria: Cannon + burst >= 3 + reloadtime <= 0.7
+        if (wtype == 'Cannon' and
+                weapon.get('burst', 1) >= 3 and
+                weapon.get('reload_time', 999) <= 0.7):
+            return self.category_map.get('plasma-repeater')
+        
+        # Plasma Shotgun (Cannon with 3+ projectiles)
+        if wtype == 'Cannon' and weapon.get('projectiles', 1) >= 3:
+            return self.category_map.get('plasma-shotgun')
+
+        # Plasma Blast (Cannon with impulsefactor >= 0.5)
+        if wtype == 'Cannon' and weapon.get('impulse', 0) >= 0.5:
+            return self.category_map.get('plasma-blast')
+
         # Cannons
         if wtype == 'Cannon':
             return self.category_map.get('cannon')
@@ -731,7 +1168,18 @@ class WeaponCategoryDetector:
         if wtype == 'Flame':
             return self.category_map.get('flamethrower')
         
-        # LaserCannon (regular - after railgun and sea laser checks)
+        # Gatling Gun (CHECK BEFORE general LaserCannon)
+        # Criteria: LaserCannon + reloadtime < 0.5 + burst >= 3
+        if (wtype == 'LaserCannon' and
+                weapon.get('reload_time', 999) < 0.5 and
+                weapon.get('burst', 1) >= 3):
+            return self.category_map.get('gatling-gun')
+        
+        # Shotgun Cannon (LaserCannon with 3+ projectiles)
+        if wtype == 'LaserCannon' and weapon.get('projectiles', 1) >= 3:
+            return self.category_map.get('shotgun-cannon')
+
+        # LaserCannon (regular - after railgun, sea laser and gatling gun checks)
         if wtype == 'LaserCannon':
             return self.category_map.get('laser-cannon')
         
@@ -747,6 +1195,11 @@ class WeaponCategoryDetector:
         if wtype == 'Melee':
             return self.category_map.get('melee')
         
+        # Aircraft EMP Bomb (CHECK FIRST - more specific than regular AircraftBomb)
+        # Criteria: AircraftBomb + paralyzer = true
+        if wtype == 'AircraftBomb' and weapon.get('paralyzer', False):
+            return self.category_map.get('aircraft-emp-bomb')
+        
         # AircraftBomb
         if wtype == 'AircraftBomb':
             return self.category_map.get('aircraft-bomb')
@@ -754,6 +1207,10 @@ class WeaponCategoryDetector:
         # D-Gun (special weapon)
         if 'disintegrator' in weapondef_key:
             return self.category_map.get('d-gun')
+        
+        # Shield (weapontype = Shield)
+        if wtype == 'Shield':
+            return self.category_map.get('shield')
         
         # Default: None (no category)
         return None
@@ -812,9 +1269,9 @@ class WeaponSyncService:
             
             if response.status_code == 200:
                 tree = response.json()
-                # Find the file in the tree
+                # Only search in units/ directory
                 for item in tree.get('tree', []):
-                    if item['path'].endswith(f'/{unit_name}.lua') or item['path'] == f'units/{unit_name}.lua':
+                    if item['path'].startswith('units/') and item['path'].endswith(f'/{unit_name}.lua'):
                         # Found it! Fetch the file
                         file_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/refs/heads/{GITHUB_BRANCH}/{item['path']}"
                         file_response = requests.get(file_url, headers=headers)
@@ -828,16 +1285,131 @@ class WeaponSyncService:
         except Exception as e:
             print(f"  ❌ Error fetching unit file: {e}")
             return None
-    
+
+    def _get_github_headers(self) -> dict:
+        """Return GitHub auth headers if token is available."""
+        token = os.environ.get("GITHUB_TOKEN")
+        return {'Authorization': f'token {token}'} if token else {}
+
+    def build_weapons_folder_index(self) -> Dict[str, str]:
+        """
+        Build a one-time index of all weapondef keys in the weapons/ folder.
+        Scans every .lua file under weapons/ on GitHub and maps each weapondef
+        key (lowercase) to the file path it lives in.
+        e.g. { "crawl_blastsml": "weapons/crawl_blast.lua", ... }
+        Cached in self._weapons_file_index so GitHub is only hit once per run.
+        """
+        if hasattr(self, '_weapons_file_index'):
+            return self._weapons_file_index
+
+        print("  \U0001f50d Building weapons/ folder index (one-time scan)...")
+        headers = self._get_github_headers()
+        index: Dict[str, str] = {}
+
+        # Get list of all .lua files in weapons/ via GitHub tree API
+        tree_url = (
+            f"https://api.github.com/repos/{GITHUB_REPO}"
+            f"/git/trees/{GITHUB_BRANCH}?recursive=1"
+        )
+        try:
+            resp = requests.get(tree_url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            tree = resp.json()
+        except Exception as e:
+            print(f"  \u274c Could not fetch GitHub tree: {e}")
+            self._weapons_file_index = index
+            return index
+
+        weapon_files = [
+            item['path'] for item in tree.get('tree', [])
+            if item['path'].startswith('weapons/') and item['path'].endswith('.lua')
+        ]
+        print(f"     Found {len(weapon_files)} .lua files in weapons/")
+
+        # Fetch each file and scan for top-level weapondef keys
+        key_pattern = re.compile(r'^\s{0,4}(\w+)\s*=\s*\{', re.MULTILINE)
+
+        for path in weapon_files:
+            url = (
+                f"https://raw.githubusercontent.com/{GITHUB_REPO}"
+                f"/refs/heads/{GITHUB_BRANCH}/{path}"
+            )
+            try:
+                r = requests.get(url, headers=headers, timeout=10)
+                if r.status_code != 200:
+                    continue
+                file_content = re.sub(r'--[^\n]*', '', r.text)
+
+                # Prefer scanning inside WeaponDefs block if present
+                wd_match = re.search(r'\bWeaponDefs\s*=\s*\{', file_content, re.IGNORECASE)
+                if wd_match:
+                    wd_block = LuaParser.extract_balanced_braces(file_content, wd_match.end() - 1)
+                    scan_text = wd_block or file_content
+                else:
+                    scan_text = file_content
+
+                for m in key_pattern.finditer(scan_text):
+                    key = m.group(1).lower()
+                    if key in ('weapondefs', 'return', 'local', 'damage'):
+                        continue
+                    if key not in index:
+                        index[key] = path
+
+            except Exception as e:
+                print(f"     \u26a0\ufe0f  Error scanning {path}: {e}")
+
+        print(f"     \u2705 Index built: {len(index)} weapondef keys across {len(weapon_files)} files")
+        self._weapons_file_index = index
+        return index
+
+    def fetch_mine_weapon_file(self, explodeas: str) -> Optional[str]:
+        """
+        Fetch the .lua file containing the given explodeas weapondef.
+        First tries direct filename match, then consults weapons/ folder index.
+        """
+        headers = self._get_github_headers()
+        key = explodeas.lower()
+
+        # Fast path: file named exactly after the key
+        filename = key + ".lua"
+        url = (
+            f"https://raw.githubusercontent.com/{GITHUB_REPO}"
+            f"/refs/heads/{GITHUB_BRANCH}/weapons/{filename}"
+        )
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                print(f"  \u2705 Found mine weapon file: weapons/{filename}")
+                return r.text
+        except Exception:
+            pass
+
+        # Slow path: consult the index
+        index = self.build_weapons_folder_index()
+        if key in index:
+            found_path = index[key]
+            url = (
+                f"https://raw.githubusercontent.com/{GITHUB_REPO}"
+                f"/refs/heads/{GITHUB_BRANCH}/{found_path}"
+            )
+            try:
+                r = requests.get(url, headers=headers, timeout=10)
+                if r.status_code == 200:
+                    print(f"  \u2705 Found mine weapon file via index: {found_path}")
+                    return r.text
+            except Exception as e:
+                print(f"  \u274c Error fetching {found_path}: {e}")
+        else:
+            print(f"  \u26a0\ufe0f  '{key}' not found in weapons/ index")
+
+        return None
+
     def sync_weapons_for_unit(self, unit_name: str, dry_run: bool = False, publish: bool = False) -> Tuple[List[str], List[Dict]]:
         """
         Sync all weapons for a single unit.
+        For mine units (mine = true in customparams), fetches the explosion
+        weapon from weapons/explodeas.lua instead of the unit's weapondefs.
         Returns tuple of (weapon_ids, weapons_data).
-        
-        Args:
-            unit_name: Name of the unit to sync weapons for
-            dry_run: If True, preview changes without making them
-            publish: If True, publish weapons immediately (default: draft)
         """
         print(f"\nProcessing unit: {unit_name}")
         
@@ -846,9 +1418,65 @@ class WeaponSyncService:
         if not unit_content:
             return [], []
         
-        # Parse weapons
-        weapons = WeaponParser.parse_weapondefs(unit_content, unit_name)
-        
+        # Strip Lua comments before parsing
+        unit_content_clean = re.sub(r'--[^\n]*', '', unit_content)
+
+        # ── Detect if this is a mine or crawling bomb unit ───────────────────
+        # Both types use an external explodeas weapon — unitdef weapons are ignored.
+        #
+        # Mine:          customparams { mine = true }
+        # Crawling bomb: selfdestructcountdown = 0
+        #                customparams { unitgroup = "explo", instantselfd = true }
+
+        is_explode_unit = False   # True for mines AND crawling bombs
+        explodeas = None
+
+        cp_match = re.search(r'\bcustomparams\s*=\s*\{', unit_content_clean, re.IGNORECASE)
+        cp_block = None
+        if cp_match:
+            cp_block = LuaParser.extract_balanced_braces(unit_content_clean, cp_match.end() - 1)
+
+        # Mine check
+        if cp_block and re.search(r'\bmine\s*=\s*true', cp_block, re.IGNORECASE):
+            is_explode_unit = True
+            print(f"  💣 Mine unit detected")
+
+        # Crawling bomb check
+        if not is_explode_unit:
+            has_sdc0    = bool(re.search(r'\bselfdestructcountdown\s*=\s*0\b', unit_content_clean, re.IGNORECASE))
+            has_explo   = bool(cp_block and re.search(r'\bunitgroup\s*=\s*["\']+explo["\']+', cp_block, re.IGNORECASE))
+            has_instant = bool(cp_block and re.search(r'\binstantselfd\s*=\s*true', cp_block, re.IGNORECASE))
+            if has_sdc0 and has_explo and has_instant:
+                is_explode_unit = True
+                print(f"  💥 Crawling bomb detected")
+
+        if is_explode_unit:
+            ea_match = re.search(r'\bexplodeas\s*=\s*["\']+([\w]+)["\']+', unit_content_clean, re.IGNORECASE)
+            if not ea_match:
+                ea_match = re.search(r'\bexplodeas\s*=\s*(\w+)', unit_content_clean, re.IGNORECASE)
+            if ea_match:
+                explodeas = ea_match.group(1)
+                print(f"     explodeas = {explodeas}")
+            else:
+                print(f"  ⚠️  Explode unit but no explodeas found — skipping weapon sync")
+                return [], []
+
+        # ── Parse weapons ──────────────────────────────────────────────────────
+        if is_explode_unit and explodeas:
+            # Mine / crawling bomb: use ONLY the external explodeas weapon.
+            # All weapondefs inside the unitdef are ignored.
+            mine_content = self.fetch_mine_weapon_file(explodeas)
+            if not mine_content:
+                print(f"  ⚠️  Could not fetch explodeas weapon file for {explodeas}")
+                return [], []
+            mine_weapon = WeaponParser.parse_mine_weapondef(mine_content, unit_name, explodeas)
+            if not mine_weapon:
+                return [], []
+            weapons = [mine_weapon]
+        else:
+            # Normal unit: parse weapondefs from the unit file
+            weapons = WeaponParser.parse_weapondefs(unit_content, unit_name)
+
         if not weapons:
             print(f"  ℹ️  No weapons found")
             return [], []
@@ -872,7 +1500,19 @@ class WeaponSyncService:
             if weapon.get('dot', 0) > 0:
                 dot_info = f" [DOT: {weapon['dot']}]"
             
-            print(f"    🔫 {weapon_name} (count: {weapon['weapon_count']}, DPS: {weapon['dps']}{dot_info})")
+            # Show PPS info if paralyzer
+            pps_info = ""
+            if weapon.get('pps', 0) > 0:
+                pps_info = f" [PPS: {weapon['pps']}]"
+            
+            # Show shield info
+            shield_info = ""
+            if weapon.get('weapon_type') == 'Shield':
+                shield_power = weapon.get('shield_power', 0)
+                shield_regen = weapon.get('shield_power_regen', 0)
+                shield_info = f" [Shield: {shield_power}, Regen: {shield_regen}/s]"
+            
+            print(f"    🔫 {weapon_name} (count: {weapon['weapon_count']}, DPS: {weapon['dps']}{dot_info}{pps_info}{shield_info})")
             
             # Detect category
             category_id = self.category_detector.detect_category(weapon) if self.category_detector else None
@@ -887,6 +1527,7 @@ class WeaponSyncService:
                 # Stats
                 'dps': weapon['dps'],
                 'dot': weapon.get('dot', 0),  # Damage Over Time (cluster/napalm)
+                'pps': weapon.get('pps', 0),  # Paralyse Per Second (EMP weapons)
                 'reload-time': weapon['reload_time'],
                 'weapon-range': weapon['range'],  # NOT range
                 'accuracy': weapon['accuracy'],
@@ -919,6 +1560,13 @@ class WeaponSyncService:
                 'homing': weapon['homing'],
                 'turnrate': weapon['turn_rate'],  # NOT turn-rate (no dash)
                 'waterweapon': weapon['water_weapon'],  # NOT water-weapon (no dash)
+                'large-beam-laser': weapon['large_beam_laser'],
+                
+                # Shield properties (for weapontype = Shield)
+                'shield-power': weapon.get('shield_power', 0),
+                'shield-regen': weapon.get('shield_power_regen', 0),
+                'shield-regen-energy-cost': weapon.get('shield_power_regen_energy', 0),
+                'shield-radius': weapon.get('shield_radius', 0),
                 
                 # Target capabilities
                 'can-target-surface': weapon['can_target_surface'],
@@ -936,6 +1584,10 @@ class WeaponSyncService:
             # Add stockpile limit if present
             if weapon['stockpile_limit'] is not None:
                 field_data['stockpile-limit'] = weapon['stockpile_limit']
+            
+            # Add beamtime only if > 0 (most weapons don't have this)
+            if weapon.get('beamtime', 0) > 0:
+                field_data['beamtime'] = weapon['beamtime']
             
             # Check if weapon exists
             existing = existing_lookup.get(weapon_name)
@@ -996,7 +1648,7 @@ class WeaponSyncService:
         
         return weapon_ids, weapons
     
-    def link_weapons_to_unit(self, unit_name: str, weapon_ids: List[str], weapons_data: List[Dict], dry_run: bool = False):
+    def link_weapons_to_unit(self, unit_name: str, weapon_ids: List[str], weapons_data: List[Dict], dry_run: bool = False, publish: bool = False):
         """
         Link weapons to their parent unit via multi-reference field.
         Also sets unit-level target capabilities based on weapons.
@@ -1024,6 +1676,8 @@ class WeaponSyncService:
         if dry_run:
             print(f"  🔍 Would link {len(weapon_ids)} weapons to unit {unit_name}")
             print(f"     Anti-Surface: {has_anti_surface}, Anti-Air: {has_anti_air}, Anti-Sub: {has_anti_sub}")
+            if publish:
+                print(f"     📢 Would publish unit")
         else:
             # Update unit with weapons reference AND target capabilities
             update_data = {
@@ -1043,6 +1697,12 @@ class WeaponSyncService:
                     caps.append("Sub")
                 print(f"  ✅ Linked {len(weapon_ids)} weapons to unit")
                 print(f"     Can target: {', '.join(caps) if caps else 'None'}")
+                if publish:
+                    pub_ok = self.units_api.publish_item(unit['id'])
+                    if pub_ok:
+                        print(f"     📢 Unit published")
+                    else:
+                        print(f"     ⚠️  Unit publish failed")
     
     def cleanup_zero_damage_weapons(self, dry_run: bool = False):
         """
@@ -1110,6 +1770,7 @@ def main():
     parser.add_argument('--dry-run', action='store_true', help='Preview changes without writing')
     parser.add_argument('--unit', type=str, help='Sync weapons for specific unit only')
     parser.add_argument('--all', action='store_true', help='Sync weapons for all units in Webflow')
+    parser.add_argument('--mines', action='store_true', help='Sync mine units only (mine=true in customparams)')
     parser.add_argument('--publish', action='store_true', help='Publish weapons immediately (default: draft)')
     parser.add_argument('--cleanup', action='store_true', help='Archive zero-damage weapons from previous syncs')
     args = parser.parse_args()
@@ -1163,7 +1824,90 @@ def main():
     if args.unit:
         # Single unit mode
         weapon_ids, weapons_data = sync_service.sync_weapons_for_unit(args.unit, dry_run=args.dry_run, publish=args.publish)
-        sync_service.link_weapons_to_unit(args.unit, weapon_ids, weapons_data, dry_run=args.dry_run)
+        sync_service.link_weapons_to_unit(args.unit, weapon_ids, weapons_data, dry_run=args.dry_run, publish=args.publish)
+    elif args.mines:
+        # Mines-only mode: scan all active Webflow units, detect mines via GitHub file check
+        print("💣 MINES + CRAWLING BOMBS MODE")
+        print()
+        print("📦 Fetching all units from Webflow...")
+        all_units = sync_service.units_api.get_all_items()
+        active_units = [u for u in all_units if not u.get('isArchived', False)]
+        print(f"  Found {len(active_units)} active units — scanning for mines and crawling bombs...")
+        print()
+
+        github_token = os.environ.get("GITHUB_TOKEN")
+        gh_headers = {'Authorization': f'token {github_token}'} if github_token else {}
+
+        mine_units = []
+        for unit in active_units:
+            unit_name = unit.get('fieldData', {}).get('name', '')
+            if not unit_name:
+                continue
+            url = (
+                f"https://raw.githubusercontent.com/{GITHUB_REPO}"
+                f"/refs/heads/{GITHUB_BRANCH}/units/{unit_name}.lua"
+            )
+            try:
+                r = requests.get(url, headers=gh_headers, timeout=10)
+                if r.status_code != 200:
+                    continue
+                clean = re.sub(r'--[^\n]*', '', r.text)
+                cp_m = re.search(r'\bcustomparams\s*=\s*\{', clean, re.IGNORECASE)
+                cp_block = None
+                if cp_m:
+                    cp_block = LuaParser.extract_balanced_braces(clean, cp_m.end() - 1)
+
+                # Mine check
+                if cp_block and re.search(r'\bmine\s*=\s*true', cp_block, re.IGNORECASE):
+                    mine_units.append(unit_name)
+                    print(f"  💣 Mine: {unit_name}")
+                    continue
+
+                # Crawling bomb check
+                has_sdc0    = bool(re.search(r'\bselfdestructcountdown\s*=\s*0\b', clean, re.IGNORECASE))
+                has_explo   = bool(cp_block and re.search(r'\bunitgroup\s*=\s*["\']+explo["\']+', cp_block, re.IGNORECASE))
+                has_instant = bool(cp_block and re.search(r'\binstantselfd\s*=\s*true', cp_block, re.IGNORECASE))
+                if has_sdc0 and has_explo and has_instant:
+                    mine_units.append(unit_name)
+                    print(f"  💥 Crawling bomb: {unit_name}")
+
+            except Exception as e:
+                print(f"  ⚠️  Could not check {unit_name}: {e}")
+
+        print()
+        print(f"  ✅ Found {len(mine_units)} explode units (mines + crawling bombs)")
+        print()
+
+        success_count = 0
+        skip_count = 0
+        error_count = 0
+
+        for idx, unit_name in enumerate(mine_units, 1):
+            print(f"[{idx}/{len(mine_units)}] {unit_name}")
+            try:
+                weapon_ids, weapons_data = sync_service.sync_weapons_for_unit(
+                    unit_name, dry_run=args.dry_run, publish=args.publish
+                )
+                if weapon_ids:
+                    sync_service.link_weapons_to_unit(
+                        unit_name, weapon_ids, weapons_data, dry_run=args.dry_run, publish=args.publish
+                    )
+                    success_count += 1
+                else:
+                    skip_count += 1
+            except Exception as e:
+                print(f"  ❌ Error: {e}")
+                error_count += 1
+            print()
+
+        print("=" * 80)
+        print("MINES SUMMARY")
+        print("=" * 80)
+        print(f"Explode units found: {len(mine_units)}")
+        print(f"✅ Synced        : {success_count}")
+        print(f"⏭️  Skipped       : {skip_count}")
+        if error_count > 0:
+            print(f"❌ Errors        : {error_count}")
     elif args.all:
         # All units mode - fetch from Webflow and sync each
         print("📦 Fetching all units from Webflow...")
@@ -1200,7 +1944,7 @@ def main():
                 )
                 
                 if weapon_ids:
-                    sync_service.link_weapons_to_unit(unit_name, weapon_ids, weapons_data, dry_run=args.dry_run)
+                    sync_service.link_weapons_to_unit(unit_name, weapon_ids, weapons_data, dry_run=args.dry_run, publish=args.publish)
                     success_count += 1
                 else:
                     # No weapons found (builders, eco, etc.)
@@ -1222,11 +1966,13 @@ def main():
         if error_count > 0:
             print(f"❌ Errors: {error_count}")
     else:
-        print("ℹ️  No action specified. Use --unit, --all, or --cleanup")
+        print("ℹ️  No action specified. Use --unit, --all, --mines, or --cleanup")
         print("   Examples:")
         print("   python sync_weapons_to_webflow.py --unit armcom")
         print("   python sync_weapons_to_webflow.py --all")
         print("   python sync_weapons_to_webflow.py --all --publish")
+        print("   python sync_weapons_to_webflow.py --mines")
+        print("   python sync_weapons_to_webflow.py --mines --dry-run")
         print("   python sync_weapons_to_webflow.py --cleanup")
     
     print()
