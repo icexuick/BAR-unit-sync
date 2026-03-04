@@ -9,7 +9,7 @@ Automatically sync unit data from the [Beyond All Reason GitHub repository](http
 
 ## 🎯 Features
 
-- ✅ Syncs **36 fields** total: 17 direct stats + 13 computed + 4 references + 2 images
+- ✅ Syncs **41 fields** total: 22 direct stats + 13 computed + 4 references + 2 images
 - ✅ **Auto-creates new units** as drafts in Webflow when they don't exist yet
 - ✅ Only syncs **buildable units** (recursive tree from commanders: armcom, corcom, legcom)
 - ✅ **Auto-unpublishes** units not in commander tree (sets published items to draft)
@@ -50,10 +50,16 @@ Automatically sync unit data from the [Beyond All Reason GitHub repository](http
 | `sonardistance` | `metal-make` | Number (Sonarrange) |
 | `jammerdistance` | `jammerrange` | Number |
 | `mass` | `mass` | Number |
+| `metalmake` | `metal-create` | Number (passive metal income) |
+| `metalstorage` | `metal-storage` | Number |
+| `energystorage` | `energy-storage` | Number |
+| `seismicdistance` | `seismic-detector-range` | Number (stealth detector radius) |
 | `cloakcost` | `cloak-cost` | Number |
 | `cloakcostmoving` | `cloak-cost-moving` | Number |
 | `customparams.paralyzemultiplier` | `paralyze-multiplier` | Number |
 | `customparams.techlevel` | `techlevel` | Number |
+| `customparams.energyconv_capacity` | `converter-metal-make` | Number (metal maker output) |
+| `customparams.energyconv_efficiency` | `converter-efficiency` | Number (metal maker efficiency) |
 
 ### Derived / computed fields
 
@@ -93,7 +99,7 @@ Automatically sync unit data from the [Beyond All Reason GitHub repository](http
 | Resurrector | `canresurrect = true` |
 | Capturer | `cancapture = true` |
 | Transport | `transportsize > 0` |
-| Stealth Detector | `seismicdistance > 0` |
+| Stealth Detector | `seismicdistance > 0` (passive underground detection radius) |
 
 ---
 
@@ -217,13 +223,17 @@ dps += (max(dmg_vtol, dmg_default) × (1 / reloadtime)) × salvosize × burst ×
 
 The formula uses `dmg_vtol` when it is higher than `dmg_default`, matching the game's own logic for anti-air optimised weapons.
 
+**Sweepfire multiplier:** if `customparams.sweepfire = N` is set on a weapondef, `dmg_default` is multiplied by N before DPS is calculated. This represents weapons that fire N simultaneous beams.
+
 **A weapon is skipped if:**
 - Its `name` field contains `bogus` or `mine` (always placeholders)
 - Both `dmg_default` and `dmg_vtol` are zero or absent
-- `customparams.bogus = 1` AND `dmg = 0` (bogus weapons with real damage ARE included)
+- `customparams.bogus = 1` (bogus flag in customparams)
+- `customparams.smart_backup = true` (alternative fire mode — excluded from unit DPS total)
 
-**EMP / paralyzer weapons** (`paralyzer = true`) appear in the `weapons` field with an `EMP-` prefix (e.g. `EMP-BeamLaser`) and **do** contribute to the DPS value (their damage is included in the total).
+**EMP / paralyzer weapons** (`paralyzer = true`) appear in the `weapons` field with an `EMP-` prefix (e.g. `EMP-BeamLaser`) but do **not** contribute to the DPS value — they paralyse, not damage.
 
+**Commented-out Lua values** (e.g. `--vtol = 400`) are stripped before parsing, so they are correctly ignored in damage and DPS calculations.
 ---
 
 ## 🎨 Image Sync (Icons + Buildpics)
