@@ -432,6 +432,13 @@ class WeaponParser:
             area_onhit_time = None
             is_bogus = False  # Parse bogus flag
             is_nuclear = False  # Nuclear missile flag (customparams)
+            is_juno = False    # Juno Surge flag (customparams)
+            # Drone carrier fields (from customparams)
+            drone_carried_unit = None
+            drone_spawnrate = None
+            drone_maxunits = None
+            drone_energycost = None
+            drone_metalcost = None
             nofire = False  # Parse nofire flag (crush/stomp indicator)
             smart_backup = False  # Parse smart_backup (alternative fire mode)
             sweepfire = 1  # Sweepfire multiplier (default 1 = no sweep)
@@ -444,6 +451,20 @@ class WeaponParser:
                         is_bogus = True
                     if re.search(r'\bnuclear\s*=\s*1', wcp_block, re.IGNORECASE):
                         is_nuclear = True
+                    if re.search(r'\bjunotype\s*=', wcp_block, re.IGNORECASE):
+                        is_juno = True
+                    # Drone carrier detection
+                    cu_m = re.search(r'\bcarried_unit\s*=\s*["\']([\w]+)["\']', wcp_block, re.IGNORECASE)
+                    if cu_m:
+                        drone_carried_unit = cu_m.group(1).lower()
+                        sr_m = re.search(r'\bspawnrate\s*=\s*([0-9.]+)', wcp_block, re.IGNORECASE)
+                        if sr_m: drone_spawnrate = int(float(sr_m.group(1)))
+                        mu_m = re.search(r'\bmaxunits\s*=\s*([0-9]+)', wcp_block, re.IGNORECASE)
+                        if mu_m: drone_maxunits = int(mu_m.group(1))
+                        ec_m = re.search(r'\benergycos[t]\s*=\s*([0-9.]+)', wcp_block, re.IGNORECASE)
+                        if ec_m: drone_energycost = int(float(ec_m.group(1)))
+                        mc_m = re.search(r'\bmetalcos[t]\s*=\s*([0-9.]+)', wcp_block, re.IGNORECASE)
+                        if mc_m: drone_metalcost = int(float(mc_m.group(1)))
                     # Nofire flag (crush/stomp melee indicator)
                     if re.search(r'\bnofire\s*=\s*true', wcp_block, re.IGNORECASE):
                         nofire = True
@@ -514,7 +535,14 @@ class WeaponParser:
                 '_spark_maxunits': spark_maxunits,  # Lightning chain max targets
                 '_is_bogus': is_bogus,  # Bogus/dummy weapon flag
                 '_is_nuclear': is_nuclear,  # Nuclear missile flag
+                '_is_juno': is_juno,        # Juno Surge flag
                 '_sweepfire': sweepfire,  # Sweepfire beam multiplier
+                # Drone carrier
+                '_drone_carried_unit': drone_carried_unit,
+                '_drone_spawnrate':    drone_spawnrate,
+                '_drone_maxunits':     drone_maxunits,
+                '_drone_energycost':   drone_energycost,
+                '_drone_metalcost':    drone_metalcost,
                 '_nofire': nofire,  # Nofire flag (crush/stomp melee indicator)
                 '_smart_backup': smart_backup,  # Smart backup (alternative fire mode)
                 
@@ -659,14 +687,21 @@ class WeaponParser:
             if weapon.get('_sweepfire', 1) > 1:
                 weapon['damage_default'] = weapon['damage_default'] * weapon['_sweepfire']
 
+            # Skip DPS for Anti-Nuke weapons — they intercept, not damage
+            if weapon.get('_interceptor', False):
+                weapon['dps'] = 0
+                weapon['dot'] = 0
+                weapon['pps'] = 0
+                # Continue to include weapon (damage shown, but DPS = 0)
+
             # Skip DPS/DOT/PPS calculation for Shield weapons
             # Shields have no damage - they only provide protection
-            if weapon.get('weapon_type') == 'Shield':
+            elif weapon.get('weapon_type') == 'Shield':
                 weapon['dps'] = 0
                 weapon['dot'] = 0
                 weapon['pps'] = 0
                 # Continue to include weapon in list (shields are valid weapons)
-            
+
             # Skip DPS/DOT calculation for paralyzer weapons (EMP)
             # They do paralysis, not real damage
             elif weapon.get('paralyzer', False):
@@ -749,7 +784,8 @@ class WeaponParser:
             total_damage = weapon['damage_default'] + weapon['damage_vtol'] + weapon['damage_subs'] + weapon['damage_commanders']
             is_shield = weapon['weapon_type'] == 'Shield'
             
-            if total_damage <= 0 and not is_shield:
+            is_drone_carrier = weapon.get('_drone_carried_unit') is not None
+            if total_damage <= 0 and not is_shield and not is_drone_carrier:
                 print(f"  ⏭️  Skipping {weapon['weapondef_key']}: no damage (total=0)")
                 continue
             
@@ -992,11 +1028,19 @@ class WeaponCategoryDetector:
         weapondef_key = weapon.get('weapondef_key', '').lower()
         full_name = weapon.get('full_name', '').lower()
         
+        # Drone Carrier (CHECK FIRST - absolute priority)
+        if weapon.get('_drone_carried_unit'):
+            return self.category_map.get('drone-controller')
+
         # Mine / Trigger Explosive (CHECK FIRST - absolute priority)
         # These are explosion weapons from external weapons/ files
         if weapon.get('_is_mine', False):
             return self.category_map.get('trigger-explosive')
         
+        # Juno Surge (customparams.junotype present — any weapon type)
+        if weapon.get('_is_juno', False):
+            return self.category_map.get('juno-surge')
+
         # Anti-Nuke detection (CHECK FIRST - highest priority)
         # Multiple indicators: interceptor flag, name indicators
         is_antinuke = False
@@ -1489,7 +1533,14 @@ class WeaponSyncService:
             item.get('fieldData', {}).get('name', ''): item
             for item in existing_weapons
         }
-        
+
+        # Pre-fetch all Webflow units once (used for carried-units reference lookup)
+        _all_webflow_units = self.units_api.get_all_items()
+        _units_by_name = {
+            u.get('fieldData', {}).get('name', '').lower(): u['id']
+            for u in _all_webflow_units if u.get('id')
+        }
+
         weapon_ids = []
         
         for weapon in weapons:
@@ -1588,7 +1639,60 @@ class WeaponSyncService:
             # Add beamtime only if > 0 (most weapons don't have this)
             if weapon.get('beamtime', 0) > 0:
                 field_data['beamtime'] = weapon['beamtime']
-            
+
+            # ── Drone carrier: override stats from carried_unit weapons ─────
+            if weapon.get('_drone_carried_unit'):
+                carried_name = weapon['_drone_carried_unit']
+                print(f"     🚁 Drone carrier — fetching stats from {carried_name}")
+
+                # Override cost/spawn fields from customparams
+                if weapon['_drone_spawnrate'] is not None:
+                    field_data['stockpile-time'] = weapon['_drone_spawnrate']
+                if weapon['_drone_maxunits'] is not None:
+                    field_data['number-of-weapons-on-unit'] = weapon['_drone_maxunits']
+                if weapon['_drone_energycost'] is not None:
+                    field_data['energy-per-shot'] = weapon['_drone_energycost']
+                if weapon['_drone_metalcost'] is not None:
+                    field_data['metal-per-shot'] = weapon['_drone_metalcost']
+
+                # Fetch drone unit file and parse its weapons for DPS/damage stats
+                drone_content = self.fetch_unit_file(carried_name)
+                if drone_content:
+                    drone_weapons = WeaponParser.parse_weapondefs(drone_content, carried_name)
+                    if drone_weapons:
+                        # Use first real damage-dealing weapon from drone
+                        drone_w = next((w for w in drone_weapons
+                                        if w.get('damage_default', 0) > 0 or w.get('damage_vtol', 0) > 0), None)
+                        if drone_w:
+                            field_data['dps']              = drone_w.get('dps', 0)
+                            field_data['dot']              = drone_w.get('dot', 0)
+                            field_data['pps']              = drone_w.get('pps', 0)
+                            field_data['damage-default']   = drone_w.get('damage_default', 0)
+                            field_data['damage-commanders']= drone_w.get('damage_commanders', 0)
+                            field_data['damage-vtol']      = drone_w.get('damage_vtol', 0)
+                            field_data['damage-submarines']= drone_w.get('damage_subs', 0)
+                            field_data['reload-time']      = drone_w.get('reload_time', 0)
+                            field_data['accuracy']         = drone_w.get('accuracy', 0)
+                            field_data['area-of-effect']   = drone_w.get('area_of_effect', 0)
+                            field_data['projectiles']      = drone_w.get('projectiles', 1)
+                            field_data['burst']            = drone_w.get('burst', 1)
+                            field_data['homing']           = drone_w.get('homing', False)
+                            print(f"       ✅ Drone DPS={drone_w.get('dps', 0)} from {drone_w['weapondef_key']}")
+                        else:
+                            print(f"       ⚠️  No damage-dealing weapon found in {carried_name}")
+                    else:
+                        print(f"       ⚠️  No weapondefs found in {carried_name}")
+                else:
+                    print(f"       ⚠️  Could not fetch drone unit file: {carried_name}")
+
+                # Resolve carried_unit → Webflow item ID for multi-reference (cached)
+                carried_id = _units_by_name.get(carried_name)
+                if carried_id:
+                    field_data['carried-units'] = [carried_id]
+                    print(f"       🔗 Linked carried unit: {carried_name} ({carried_id})")
+                else:
+                    print(f"       ⚠️  Carried unit '{carried_name}' not found in Webflow (not yet synced?)")
+
             # Check if weapon exists
             existing = existing_lookup.get(weapon_name)
             

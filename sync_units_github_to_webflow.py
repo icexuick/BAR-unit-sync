@@ -368,7 +368,7 @@ class LuaParser:
         return None
 
     @staticmethod
-    def parse_weapons(unit_block: str) -> Dict:
+    def parse_weapons(unit_block: str, unit_paths_map: dict = None) -> Dict:
         """
         Parse weapondefs + weapons blocks from a unit block to compute:
           - dps          : int  (0 if no weapons or only EMP/paralyzer)
@@ -447,6 +447,7 @@ class LuaParser:
             # Check customparams { bogus = 1, stockpilelimit = X, cluster_number, cluster_def, area_onhit, spark } inside this weapondef
             is_bogus_cp = False
             smart_backup = False  # Alternative fire mode flag
+            interceptor  = False  # Anti-nuke interceptor flag
             stockpile_limit = None
             cluster_number = None
             cluster_def = None
@@ -465,6 +466,8 @@ class LuaParser:
                 cluster_def = cd_match_root.group(1)
             
             sweepfire = 1  # Sweepfire beam multiplier (default 1 = no sweep)
+            drone_carried_unit = None  # Drone carrier: name of carried unit
+            drone_maxunits = None      # Drone carrier: max number of drones
             wcp_match = re.search(r'\bcustomparams\s*=\s*\{', wblock, re.IGNORECASE)
             if wcp_match:
                 wcp_block = LuaParser.extract_balanced_braces(wblock, wcp_match.end() - 1)
@@ -507,6 +510,18 @@ class LuaParser:
                     sw_match = re.search(r'\bsweepfire\s*=\s*([0-9]+)', wcp_block, re.IGNORECASE)
                     if sw_match:
                         sweepfire = int(sw_match.group(1))
+                    # Drone carrier
+                    cu_m = re.search(r'\bcarried_unit\s*=\s*["\']([\w]+)["\']', wcp_block, re.IGNORECASE)
+                    if cu_m:
+                        drone_carried_unit = cu_m.group(1).lower()
+                    mu_m = re.search(r'\bmaxunits\s*=\s*([0-9]+)', wcp_block, re.IGNORECASE)
+                    if mu_m:
+                        drone_maxunits = int(mu_m.group(1))
+
+            # Parse interceptor at root level (anti-nuke indicator)
+            int_m = re.search(r'^\s{0,8}interceptor\s*=\s*([0-9]+)', wblock, re.IGNORECASE | re.MULTILINE)
+            if int_m and int(int_m.group(1)) == 1:
+                interceptor = True
 
             weapondefs[wname.upper()] = {
                 'def_name':      (_val(wblock, 'name') or '').lower(),
@@ -532,7 +547,10 @@ class LuaParser:
                 'area_onhit_time': area_onhit_time,
                 'spark_forkdamage': spark_forkdamage,
                 'spark_maxunits': spark_maxunits,
-                'sweepfire':      sweepfire,
+                'sweepfire':          sweepfire,
+                'drone_carried_unit': drone_carried_unit,
+                'drone_maxunits':     drone_maxunits,
+                'interceptor':        interceptor,
             }
 
         # ── Step 2: parse weapons = { } to find which weapondefs are used ─────
@@ -618,8 +636,12 @@ class LuaParser:
             has_non_paralyzer = True
 
             # Skip smart_backup weapons (alternative fire modes) entirely
-            # They are just alternative modes of the main weapon and shouldn't be synced
             if wd.get('smart_backup', False):
+                continue
+
+            # Anti-nuke interceptors: contribute 0 DPS (they intercept, not damage)
+            if wd.get('interceptor', False):
+                weapon_table[wtype] = weapon_table.get(wtype, 0) + 1
                 continue
 
             # Pick higher damage tier (vtol vs default) — mirrors Lua logic
@@ -635,6 +657,33 @@ class LuaParser:
                     cluster_dmg = cluster_wd['dmg_default']
                     cluster_total = wd['cluster_number'] * cluster_dmg
                     weapon_dot_dps = (cluster_total / (wd['reloadtime'] or 1.0)) * wd['salvosize'] * wd['burst'] * wd['projectiles']
+
+            # ── Drone carrier weapon: get DPS from carried unit's weapons ──
+            print(f"     🔍 weapon {wd['def_name']}: interceptor={wd.get('interceptor')}, drone_carried_unit={wd.get('drone_carried_unit')}, dmg={wd.get('dmg_default')}")
+            if wd.get('drone_carried_unit'):
+                drone_name = wd['drone_carried_unit']
+                maxunits   = wd.get('drone_maxunits') or 1
+                weapon_table['DroneCarrier'] = weapon_table.get('DroneCarrier', 0) + 1
+                if wd['range'] > weapon_range:
+                    weapon_range = wd['range']
+                # Fetch and parse the drone unit file
+                github_token = os.environ.get('GITHUB_TOKEN')
+                headers = {'Authorization': f'token {github_token}'} if github_token else {}
+                # Look up exact path from unit_paths_map, fall back to flat units/ path
+                _paths = unit_paths_map or {}
+                drone_rel = _paths.get(drone_name, f'units/{drone_name}.lua')
+                drone_url = f'https://raw.githubusercontent.com/{GITHUB_REPO}/refs/heads/{GITHUB_BRANCH}/{drone_rel}'
+                drone_resp = requests.get(drone_url, headers=headers, timeout=10)
+                if drone_resp.status_code == 200:
+                    drone_data = LuaParser.parse_weapons(drone_resp.text)
+                    drone_dps = drone_data.get('dps', 0.0)
+                    print(f"     🚁 Drone {drone_name} ({drone_rel}): dps={drone_dps} x {maxunits} = {drone_dps * maxunits}")
+                    if drone_dps > 0:
+                        dps += drone_dps * maxunits
+                        result['has_damage'] = True
+                else:
+                    print(f"     ⚠️  Could not fetch drone unit {drone_name} ({drone_rel}): HTTP {drone_resp.status_code}")
+                continue  # Skip normal DPS calculation for this weapon
 
             # Skip if no main damage (regardless of paralyzer or bogus flag)
             if dmg <= 0:
@@ -736,7 +785,7 @@ class LuaParser:
         return result
 
     @staticmethod
-    def parse_unit_file(content: str, unit_name: str) -> Optional[Dict[str, Any]]:
+    def parse_unit_file(content: str, unit_name: str, unit_paths_map: dict = None) -> Optional[Dict[str, Any]]:
         """
         Parse a Lua unit definition file and extract relevant data.
         Returns a dict with the unit data, including customparams.
@@ -801,7 +850,7 @@ class LuaParser:
                     unit_data['_has_buildoptions'] = True
 
             # Parse weapons: DPS, range, weapon type list, stockpile limit, impulse, aoe, targets
-            weapon_result = LuaParser.parse_weapons(unit_block)
+            weapon_result = LuaParser.parse_weapons(unit_block, unit_paths_map=unit_paths_map)
             unit_data['_has_weapondefs'] = weapon_result['has_weapondefs']
             unit_data['_has_damage']     = weapon_result['has_damage']
             if weapon_result['has_weapondefs']:
@@ -1632,8 +1681,10 @@ class UnitSyncService:
         self.movement_lists    = {}   # Loaded from alldefs_post.lua
         self.allterrain_classes = set()  # Loaded from movedefs.lua
         self.language_data     = {}   # Loaded from language/en/units.json
-        self._buildoptions_map = {}   # { unit_name: [units_it_can_build] } — from cache/archive
-        self._webflow_id_map   = {}   # { unit_name: webflow_item_id }       — built from Webflow items
+        self._buildoptions_map  = {}  # { unit_name: [units_it_can_build] } — from cache/archive
+        self._carried_units_map = {}  # { unit_name: [drone_unit_names] }   — from cache/archive
+        self._unit_paths_map    = {}  # { unit_name: 'units/path/unit.lua' } — from cache/archive
+        self._webflow_id_map    = {}  # { unit_name: webflow_item_id }       — built from Webflow items
     
     def detect_faction(self, unit_name: str) -> Optional[Dict]:
         """
@@ -1909,11 +1960,10 @@ class UnitSyncService:
                 pass
         
         # Handle techlevel (from customparams, integer field)
-        if 'techlevel' in github_data:
-            try:
-                webflow_fields['techlevel'] = int(github_data['techlevel'])
-            except:
-                pass
+        try:
+            webflow_fields['techlevel'] = int(github_data.get('techlevel', 0) or 0)
+        except:
+            webflow_fields['techlevel'] = 0
         
         # Handle energyconv_capacity (from customparams, decimal field)
         if 'energyconv_capacity' in github_data:
@@ -2000,8 +2050,14 @@ class UnitSyncService:
 
         # Handle buildoptions multi-reference field
         # Look up what this unit can build, then resolve each to a Webflow item ID
+        # Also includes carried_units (drones) from drone carrier weapons
         if unit_name and self._buildoptions_map and self._webflow_id_map:
-            can_build = self._buildoptions_map.get(unit_name.lower(), [])
+            can_build = list(self._buildoptions_map.get(unit_name.lower(), []))
+            # Add carried_units (drones) — drone carriers don't have real buildoptions
+            carried = getattr(self, '_carried_units_map', {}).get(unit_name.lower(), [])
+            for drone in carried:
+                if drone not in can_build:
+                    can_build.append(drone)
             resolved_ids = []
             unresolved   = []
             for bo_unit in can_build:
@@ -2171,7 +2227,9 @@ class UnitSyncService:
                         cache_data.get('branch') == GITHUB_BRANCH):
                     buildable = set(cache_data.get('buildable', []))
                     # Also restore buildoptions_map into instance variable
-                    self._buildoptions_map = cache_data.get('buildoptions_map', {})
+                    self._buildoptions_map  = cache_data.get('buildoptions_map', {})
+                    self._carried_units_map = cache_data.get('carried_units_map', {})
+                    self._unit_paths_map    = cache_data.get('unit_paths_map', {})
                     print(f"  💾 Loaded {len(buildable)} buildable units from cache"
                           f" ({len(self._buildoptions_map)} units have buildoptions)"
                           f" — use --clear-cache to refresh")
@@ -2197,7 +2255,9 @@ class UnitSyncService:
             print(f"  ✅ Downloaded {len(raw) / 1024 / 1024:.1f} MB — scanning unit files...")
 
             all_buildable    = set()
-            buildoptions_map = {}   # { unit_name: [units_it_can_build] }
+            buildoptions_map  = {}  # { unit_name: [units_it_can_build] }
+            carried_units_map = {}  # { unit_name: [drone_unit_names] }
+            unit_paths_map    = {}  # { unit_name: 'units/path/to/unit.lua' }
             scanned          = 0
             with_options     = 0
 
@@ -2212,6 +2272,9 @@ class UnitSyncService:
                     unit_name = parts[-1].replace('.lua', '').lower()
                     content = zf.read(name).decode('utf-8', errors='replace')
                     scanned += 1
+                    # Store relative path (strip repo-branch prefix)
+                    rel_path = '/'.join(parts[1:])  # e.g. units/Legion/Air/legdrone.lua
+                    unit_paths_map[unit_name] = rel_path
 
                     options = LuaParser.parse_buildoptions(content, unit_name)
                     if options:
@@ -2220,10 +2283,21 @@ class UnitSyncService:
                         all_buildable.update(normalized)
                         buildoptions_map[unit_name] = normalized
 
+                    # Also scan for drone carrier weapons (customparams.carried_unit)
+                    clean = re.sub(r'--[^\n]*', '', content)
+                    for cu_m in re.finditer(r'\bcarried_unit\s*=\s*["\']([\w]+)["\']', clean, re.IGNORECASE):
+                        drone_name = cu_m.group(1).lower()
+                        if unit_name not in carried_units_map:
+                            carried_units_map[unit_name] = []
+                        if drone_name not in carried_units_map[unit_name]:
+                            carried_units_map[unit_name].append(drone_name)
+
             print(f"  Scanned {scanned} unit files, {with_options} have buildoptions")
 
             # Store on instance for use during sync
-            self._buildoptions_map = buildoptions_map
+            self._buildoptions_map  = buildoptions_map
+            self._carried_units_map = carried_units_map
+            self._unit_paths_map    = unit_paths_map
 
             # --- Build recursive tree from commanders ---
             print(f"  🌳 Building recursive build tree from commanders...")
@@ -2237,11 +2311,15 @@ class UnitSyncService:
                     return
                 visited.add(unit_name)
                 buildable_from_commanders.add(unit_name)
-                
-                # Get what this unit can build
+
+                # Get what this unit can build via buildoptions
                 can_build = buildoptions_map.get(unit_name.lower(), [])
                 for child_unit in can_build:
                     collect_buildable_recursive(child_unit, visited)
+
+                # Also include drones carried by this unit
+                for drone_unit in carried_units_map.get(unit_name.lower(), []):
+                    collect_buildable_recursive(drone_unit, visited)
             
             # Start from each commander and recursively collect their build trees
             for commander in COMMANDERS:
@@ -2270,10 +2348,12 @@ class UnitSyncService:
             try:
                 with open(BUILDABLE_CACHE_FILE, 'w') as f:
                     json.dump({
-                        'repo':             GITHUB_REPO,
-                        'branch':           GITHUB_BRANCH,
-                        'buildable':        sorted(buildable_from_commanders),
-                        'buildoptions_map': buildoptions_map,
+                        'repo':               GITHUB_REPO,
+                        'branch':             GITHUB_BRANCH,
+                        'buildable':          sorted(buildable_from_commanders),
+                        'buildoptions_map':   buildoptions_map,
+                        'carried_units_map':  carried_units_map,
+                        'unit_paths_map':     unit_paths_map,
                     }, f, indent=2)
                 print(f"  💾 Saved buildable index + buildoptions map to {BUILDABLE_CACHE_FILE}")
             except Exception as e:
@@ -2283,7 +2363,9 @@ class UnitSyncService:
 
         except Exception as e:
             print(f"  ❌ Archive download failed: {e}")
-            self._buildoptions_map = {}
+            self._buildoptions_map  = {}
+            self._carried_units_map = {}
+            self._unit_paths_map    = {}
             return set()
 
     def sync_all_units(self, dry_run: bool = False, auto_publish: bool = False,
@@ -2517,7 +2599,7 @@ class UnitSyncService:
                 continue
             
             # Parse the Lua file
-            github_data = self.parser.parse_unit_file(lua_content, unit_name)
+            github_data = self.parser.parse_unit_file(lua_content, unit_name, unit_paths_map=self._unit_paths_map)
             if not github_data:
                 print(f"  ❌ Failed to parse file")
                 stats['errors'] += 1
