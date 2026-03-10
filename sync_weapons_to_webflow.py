@@ -1251,10 +1251,15 @@ class WeaponCategoryDetector:
         if wtype == 'AircraftBomb':
             return self.category_map.get('aircraft-bomb')
         
-        # D-Gun (special weapon)
+        # D-Gun (special weapon) — disintegrator check goes first
         if 'disintegrator' in weapondef_key:
             return self.category_map.get('d-gun')
-        
+
+        # Disintegrator Cannon (DGun weapontype, but not a disintegrator beam)
+        # e.g. corjugg's juggernaut_fire (fireball/gauss variant)
+        if wtype == 'DGun':
+            return self.category_map.get('disintegrator-cannon')
+
         # Shield (weapontype = Shield)
         if wtype == 'Shield':
             return self.category_map.get('shield')
