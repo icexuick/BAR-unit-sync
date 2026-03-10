@@ -18,6 +18,7 @@ import sys
 import requests
 import re
 import json
+import math
 import hashlib
 import io
 import time
@@ -1960,10 +1961,11 @@ class UnitSyncService:
                 pass
         
         # Handle techlevel (from customparams, integer field)
+        # Default to 1 if not found (most units without explicit techlevel are T1)
         try:
-            webflow_fields['techlevel'] = int(github_data.get('techlevel', 0) or 0)
+            webflow_fields['techlevel'] = int(github_data.get('techlevel', 1) or 1)
         except:
-            webflow_fields['techlevel'] = 0
+            webflow_fields['techlevel'] = 1
         
         # Handle energyconv_capacity (from customparams, decimal field)
         if 'energyconv_capacity' in github_data:
@@ -2071,6 +2073,23 @@ class UnitSyncService:
             if unresolved:
                 # Store for display only — not sent to Webflow
                 github_data['_buildoptions_unresolved'] = unresolved
+
+        # Handle transportable-by multi-reference field
+        # Maps which transport units can carry this unit (based on mass + footprintX checks)
+        # ALWAYS send this field (even as empty list) to clear old incorrect values
+        if unit_name and hasattr(self, '_transportable_by_map') and self._webflow_id_map:
+            can_be_transported_by = self._transportable_by_map.get(unit_name.lower(), [])
+            transport_ids = []
+            transport_unresolved = []
+            for transport_name in can_be_transported_by:
+                wf_id = self._webflow_id_map.get(transport_name)
+                if wf_id:
+                    transport_ids.append(wf_id)
+                else:
+                    transport_unresolved.append(transport_name)
+            webflow_fields['transportable-by'] = transport_ids
+            if transport_unresolved:
+                github_data['_transport_unresolved'] = transport_unresolved
 
         # Handle specials (comma-separated string of special abilities)
         specials = self.detect_specials(github_data)
@@ -2227,11 +2246,13 @@ class UnitSyncService:
                         cache_data.get('branch') == GITHUB_BRANCH):
                     buildable = set(cache_data.get('buildable', []))
                     # Also restore buildoptions_map into instance variable
-                    self._buildoptions_map  = cache_data.get('buildoptions_map', {})
-                    self._carried_units_map = cache_data.get('carried_units_map', {})
-                    self._unit_paths_map    = cache_data.get('unit_paths_map', {})
+                    self._buildoptions_map    = cache_data.get('buildoptions_map', {})
+                    self._carried_units_map   = cache_data.get('carried_units_map', {})
+                    self._unit_paths_map      = cache_data.get('unit_paths_map', {})
+                    self._transportable_by_map = cache_data.get('transportable_by_map', {})
                     print(f"  💾 Loaded {len(buildable)} buildable units from cache"
-                          f" ({len(self._buildoptions_map)} units have buildoptions)"
+                          f" ({len(self._buildoptions_map)} units have buildoptions,"
+                          f" {len(self._transportable_by_map)} transportable)"
                           f" — use --clear-cache to refresh")
                     return buildable
                 else:
@@ -2258,6 +2279,8 @@ class UnitSyncService:
             buildoptions_map  = {}  # { unit_name: [units_it_can_build] }
             carried_units_map = {}  # { unit_name: [drone_unit_names] }
             unit_paths_map    = {}  # { unit_name: 'units/path/to/unit.lua' }
+            transport_defs    = {}  # { unit_name: { transportsize, transportmass } }
+            unit_transport_data = {}  # { unit_name: { mass, footprintx, cantbetransported } }
             scanned          = 0
             with_options     = 0
 
@@ -2292,12 +2315,108 @@ class UnitSyncService:
                         if drone_name not in carried_units_map[unit_name]:
                             carried_units_map[unit_name].append(drone_name)
 
+                    # --- Extract transport-relevant fields for ALL units ---
+                    # (reuses 'clean' = content with Lua comments stripped)
+
+                    # Check if this unit IS a transport (has transportsize > 0)
+                    ts_match = re.search(r'\btransportsize\s*=\s*(\d+)', clean, re.IGNORECASE)
+                    tm_match = re.search(r'\btransportmass\s*=\s*([0-9.]+)', clean, re.IGNORECASE)
+                    if ts_match and int(ts_match.group(1)) > 0:
+                        transport_defs[unit_name] = {
+                            'transportsize': int(ts_match.group(1)),
+                            # Default 100000.0 matches engine default when not specified
+                            'transportmass': float(tm_match.group(1)) if tm_match else 100000.0,
+                        }
+
+                    # For every unit: store mass, footprintx, cantbetransported
+                    # ENGINE DEFAULT (UnitDef.cpp):
+                    #   metal = max(1.0, buildCostMetal)
+                    #   mass  = clamp(GetFloat("mass", metal), MINIMUM_MASS, MAXIMUM_MASS)
+                    # So if mass is not set, the engine uses metalcost as mass.
+                    #
+                    # cantBeTransported ENGINE DEFAULT (UnitDef.cpp):
+                    #   cantBeTransported = GetBool("cantBeTransported", !RequireMoveDef())
+                    #   → structures (no movementclass, not canfly) default to TRUE (not transportable)
+                    #   → mobile units default to FALSE (transportable)
+                    #   Some structures like armllt explicitly set cantbetransported = false
+                    mass_m  = re.search(r'\bmass\s*=\s*([0-9.]+)', clean, re.IGNORECASE)
+                    mc_m    = re.search(r'\bmetalcost\s*=\s*([0-9.]+)', clean, re.IGNORECASE)
+                    fp_m    = re.search(r'\bfootprintx\s*=\s*(\d+)', clean, re.IGNORECASE)
+                    cbt_true  = re.search(r'\bcantbetransported\s*=\s*true', clean, re.IGNORECASE)
+                    cbt_false = re.search(r'\bcantbetransported\s*=\s*false', clean, re.IGNORECASE)
+                    has_moveclass = re.search(r'\bmovementclass\s*=', clean, re.IGNORECASE)
+                    has_canfly   = re.search(r'\bcanfly\s*=\s*true', clean, re.IGNORECASE)
+
+                    if mass_m:
+                        effective_mass = float(mass_m.group(1))
+                    elif mc_m:
+                        effective_mass = max(1.0, float(mc_m.group(1)))
+                    else:
+                        effective_mass = 1.0
+
+                    # Determine cantbetransported:
+                    # Engine rules (UnitDef.cpp + Unit.cpp):
+                    #   aircraft (canfly = true) → ALWAYS not transportable (BAR has transportAir disabled)
+                    #   structures (no movementclass) → not transportable by default
+                    #   mobile ground units → transportable by default
+                    # Explicit cantbetransported = true/false overrides the default for ground units
+                    # and structures, but NOT for aircraft — those are never transportable in BAR.
+                    is_aircraft = bool(has_canfly)
+                    if is_aircraft:
+                        cant_transport = True
+                    elif cbt_true:
+                        cant_transport = True
+                    elif cbt_false:
+                        cant_transport = False
+                    else:
+                        # No explicit setting: structures default to not transportable
+                        is_structure = not has_moveclass
+                        cant_transport = is_structure
+
+                    unit_transport_data[unit_name] = {
+                        'mass':                effective_mass,
+                        'footprintx':          int(fp_m.group(1)) if fp_m else 1,
+                        'cantbetransported':   cant_transport,
+                    }
+
             print(f"  Scanned {scanned} unit files, {with_options} have buildoptions")
 
+            # --- Compute transport compatibility ---
+            # For each unit, determine which transport units can carry it.
+            # Only match transports from the SAME faction (arm↔arm, cor↔cor, leg↔leg).
+            def _faction_prefix(name):
+                """Return faction prefix for a unit name, or '' if unknown."""
+                for prefix in sorted(FACTION_MAP.keys(), key=len, reverse=True):
+                    if name.startswith(prefix):
+                        return prefix
+                return ''
+
+            transportable_by_map = {}  # { unit_name: [transport_unit_names] }
+            for uname, udata in unit_transport_data.items():
+                if udata['cantbetransported']:
+                    continue
+                unit_faction = _faction_prefix(uname)
+                compatible = []
+                for tname, tdata in transport_defs.items():
+                    # Same-faction check
+                    if _faction_prefix(tname) != unit_faction:
+                        continue
+                    if (udata['footprintx'] <= tdata['transportsize'] and
+                            udata['mass'] <= tdata['transportmass']):
+                        compatible.append(tname)
+                if compatible:
+                    # Sort by transportmass (smallest capacity first)
+                    compatible.sort(key=lambda t: transport_defs[t]['transportmass'])
+                    transportable_by_map[uname] = compatible
+
+            print(f"  🚁 Found {len(transport_defs)} transport units: {', '.join(sorted(transport_defs.keys()))}")
+            print(f"  📦 Computed transport compatibility for {len(transportable_by_map)} transportable units")
+
             # Store on instance for use during sync
-            self._buildoptions_map  = buildoptions_map
-            self._carried_units_map = carried_units_map
-            self._unit_paths_map    = unit_paths_map
+            self._buildoptions_map    = buildoptions_map
+            self._carried_units_map   = carried_units_map
+            self._unit_paths_map      = unit_paths_map
+            self._transportable_by_map = transportable_by_map
 
             # --- Build recursive tree from commanders ---
             print(f"  🌳 Building recursive build tree from commanders...")
@@ -2354,6 +2473,7 @@ class UnitSyncService:
                         'buildoptions_map':   buildoptions_map,
                         'carried_units_map':  carried_units_map,
                         'unit_paths_map':     unit_paths_map,
+                        'transportable_by_map': transportable_by_map,
                     }, f, indent=2)
                 print(f"  💾 Saved buildable index + buildoptions map to {BUILDABLE_CACHE_FILE}")
             except Exception as e:
@@ -2363,21 +2483,24 @@ class UnitSyncService:
 
         except Exception as e:
             print(f"  ❌ Archive download failed: {e}")
-            self._buildoptions_map  = {}
-            self._carried_units_map = {}
-            self._unit_paths_map    = {}
+            self._buildoptions_map    = {}
+            self._carried_units_map   = {}
+            self._unit_paths_map      = {}
+            self._transportable_by_map = {}
             return set()
 
     def sync_all_units(self, dry_run: bool = False, auto_publish: bool = False,
-                       sync_icons: bool = False, unit_filter: Optional[str] = None):
+                       sync_icons: bool = False, unit_filter: Optional[str] = None,
+                       faction_filter: Optional[str] = None):
         """
         Sync all units from GitHub to Webflow.
-        
+
         Args:
             dry_run:     If True, show what would be updated without making changes
             auto_publish: If True, automatically publish updated items
             sync_icons:  If True, also sync strategic icons from icontypes.lua
             unit_filter: If set, only sync this single unit (by name, e.g. 'armzeus')
+            faction_filter: If set, only sync units whose name starts with this prefix (e.g. 'arm')
         """
         print("=" * 80)
         print("Beyond All Reason - Unit Data Sync")
@@ -2460,6 +2583,13 @@ class UnitSyncService:
         else:
             print("  ⚠️  Could not determine buildable units — syncing all units")
         print()
+
+        # Apply faction filter if requested (--faction arm)
+        if faction_filter:
+            prefix = faction_filter.strip().lower()
+            unit_files = [uf for uf in unit_files if uf['name'].lower().startswith(prefix)]
+            print(f"  🎯 Faction filter: syncing only '{prefix}*' units ({len(unit_files)} found)")
+            print()
 
         # Apply single-unit filter if requested (--unit armzeus)
         if unit_filter:
@@ -2572,6 +2702,7 @@ class UnitSyncService:
             'cloak-cost':          'Cloak Cost       ',
             'cloak-cost-moving':   'Cloak Cost Moving',
             'paralyze-multiplier': 'Paralyze Mult    ',
+            'transportable-by':   'Transportable By ',
         }
         
         stats = {
@@ -2657,6 +2788,14 @@ class UnitSyncService:
                         unresolved = github_data.get('_buildoptions_unresolved', [])
                         if unresolved:
                             print(f"     {'':19}  ⚠️  {len(unresolved)} not in Webflow (skipped): {', '.join(unresolved)}")
+                    elif field_key == 'transportable-by':
+                        # Show transport unit names (resolved from IDs) for readability
+                        id_to_name = {v: k for k, v in self._webflow_id_map.items()}
+                        names = [id_to_name.get(wf_id, wf_id) for wf_id in value]
+                        print(f"     {label}: [{', '.join(names)}]  ({len(names)} transports)")
+                        unresolved = github_data.get('_transport_unresolved', [])
+                        if unresolved:
+                            print(f"     {'':19}  ⚠️  {len(unresolved)} not in Webflow (skipped): {', '.join(unresolved)}")
                     else:
                         print(f"     {label}: {value}")
                 else:
@@ -2736,6 +2875,12 @@ class UnitSyncService:
                         old_val = next((t['name'] for t in UNIT_TYPE_MAP.values() if t['id'] == old_val), old_val)
                         new_val = next((t['name'] for t in UNIT_TYPE_MAP.values() if t['id'] == new_val), new_val)
                     elif key == 'buildoptions-ref':
+                        id_to_name = {v: k for k, v in self._webflow_id_map.items()}
+                        if isinstance(old_val, list):
+                            old_val = f"[{', '.join(id_to_name.get(i, i) for i in old_val)}] ({len(old_val)})"
+                        if isinstance(new_val, list):
+                            new_val = f"[{', '.join(id_to_name.get(i, i) for i in new_val)}] ({len(new_val)})"
+                    elif key == 'transportable-by':
                         id_to_name = {v: k for k, v in self._webflow_id_map.items()}
                         if isinstance(old_val, list):
                             old_val = f"[{', '.join(id_to_name.get(i, i) for i in old_val)}] ({len(old_val)})"
@@ -2849,6 +2994,12 @@ Examples:
         type=str,
         help='Sync only a specific unit (by name)'
     )
+
+    parser.add_argument(
+        '--faction',
+        type=str,
+        help='Sync only units from a specific faction (e.g. arm, cor, leg, raptor)'
+    )
     
     parser.add_argument(
         '--token',
@@ -2899,7 +3050,8 @@ Examples:
         dry_run=args.dry_run,
         auto_publish=auto_publish,
         sync_icons=args.sync_icons,
-        unit_filter=args.unit
+        unit_filter=args.unit,
+        faction_filter=args.faction
     )
 
 

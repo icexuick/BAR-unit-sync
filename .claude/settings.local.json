@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "mcp__claude_ai_Webflow__data_cms_tool",
+      "Bash(PYTHONIOENCODING=utf-8 python sync_weapons_to_webflow.py --unit armsptk --dry-run)"
     ]
   }
 }

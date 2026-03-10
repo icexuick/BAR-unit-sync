@@ -1143,9 +1143,12 @@ class WeaponCategoryDetector:
         if wtype == 'BeamLaser':
             return self.category_map.get('beam-laser')
         
-        # Missiles
+        # Missiles: homing (tracks=true) → missile-launcher, non-homing → rocket-launcher
         if wtype == 'MissileLauncher':
-            return self.category_map.get('missile-launcher')
+            if weapon.get('homing', False):
+                return self.category_map.get('missile-launcher')
+            else:
+                return self.category_map.get('rocket-launcher')
         
         # Nuclear Missile / Tactical Missile (CHECK BEFORE general StarburstLauncher)
         # Criteria: StarburstLauncher + targetable=1 + commandfire=true
@@ -1874,6 +1877,7 @@ def main():
     parser.add_argument('--dry-run', action='store_true', help='Preview changes without writing')
     parser.add_argument('--unit', type=str, help='Sync weapons for specific unit only')
     parser.add_argument('--all', action='store_true', help='Sync weapons for all units in Webflow')
+    parser.add_argument('--faction', type=str, help='Sync weapons for all units of a faction (e.g. arm, cor, leg)')
     parser.add_argument('--mines', action='store_true', help='Sync mine units only (mine=true in customparams)')
     parser.add_argument('--publish', action='store_true', help='Publish weapons immediately (default: draft)')
     parser.add_argument('--cleanup', action='store_true', help='Archive zero-damage weapons from previous syncs')
@@ -1915,7 +1919,7 @@ def main():
     # Run cleanup if requested
     if args.cleanup:
         sync_service.cleanup_zero_damage_weapons(dry_run=args.dry_run)
-        if not args.unit and not args.all:
+        if not args.unit and not args.all and not args.faction:
             # If only cleanup was requested, we're done
             print()
             print("=" * 80)
@@ -1929,6 +1933,48 @@ def main():
         # Single unit mode
         weapon_ids, weapons_data = sync_service.sync_weapons_for_unit(args.unit, dry_run=args.dry_run, publish=args.publish)
         sync_service.link_weapons_to_unit(args.unit, weapon_ids, weapons_data, dry_run=args.dry_run, publish=args.publish)
+    elif args.faction:
+        # Faction filter mode - reuse --all logic but filtered by prefix
+        prefix = args.faction.strip().lower()
+        print(f"Fetching all units from Webflow (faction: {prefix}*)...")
+        all_units = sync_service.units_api.get_all_items()
+        active_units = [u for u in all_units if not u.get('isArchived', False)]
+        active_units = [u for u in active_units if u.get('fieldData', {}).get('name', '').lower().startswith(prefix)]
+        print(f"  Found {len(active_units)} active '{prefix}*' units")
+        print()
+
+        success_count = 0
+        skip_count = 0
+        error_count = 0
+
+        for idx, unit in enumerate(active_units, 1):
+            unit_name = unit.get('fieldData', {}).get('name', '')
+            if not unit_name:
+                skip_count += 1
+                continue
+            print(f"[{idx}/{len(active_units)}] {unit_name}")
+            try:
+                weapon_ids, weapons_data = sync_service.sync_weapons_for_unit(
+                    unit_name, dry_run=args.dry_run, publish=args.publish
+                )
+                if weapon_ids:
+                    sync_service.link_weapons_to_unit(unit_name, weapon_ids, weapons_data, dry_run=args.dry_run, publish=args.publish)
+                    success_count += 1
+                else:
+                    skip_count += 1
+            except Exception as e:
+                print(f"  Error: {e}")
+                error_count += 1
+            print()
+
+        print("=" * 80)
+        print(f"SUMMARY ({prefix.upper()})")
+        print("=" * 80)
+        print(f"Total units: {len(active_units)}")
+        print(f"Synced        : {success_count}")
+        print(f"Skipped (no weapons): {skip_count}")
+        if error_count > 0:
+            print(f"Errors        : {error_count}")
     elif args.mines:
         # Mines-only mode: scan all active Webflow units, detect mines via GitHub file check
         print("💣 MINES + CRAWLING BOMBS MODE")
