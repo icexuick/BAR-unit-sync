@@ -1038,9 +1038,11 @@ class WeaponCategoryDetector:
         if weapon.get('_drone_carried_unit'):
             return self.category_map.get('drone-controller')
 
-        # Mine / Trigger Explosive (CHECK FIRST - absolute priority)
+        # Mine / Trigger Explosive or Trigger EMP (CHECK FIRST - absolute priority)
         # These are explosion weapons from external weapons/ files
         if weapon.get('_is_mine', False):
+            if weapon.get('paralyzer', False):
+                return self.category_map.get('trigger-emp')
             return self.category_map.get('trigger-explosive')
         
         # Juno Surge (customparams.junotype present — any weapon type)
@@ -1517,6 +1519,14 @@ class WeaponSyncService:
             if has_sdc0 and has_buildert2:
                 is_explode_unit = True
                 print(f"  🕵️  Spy bomb detected")
+
+        # EMP building explosion (selfdestructas = "empblast")
+        # e.g. armamex — explodes with EMP blast when destroyed
+        if not is_explode_unit:
+            has_empblast = bool(re.search(r'\bselfdestructas\s*=\s*["\']?empblast["\']?', unit_content_clean, re.IGNORECASE))
+            if has_empblast:
+                is_explode_unit = True
+                print(f"  💥 EMP building detected (empblast)")
 
         if is_explode_unit:
             # Prefer selfdestructas (contact/self-destruct explosion = higher damage)
@@ -2058,6 +2068,13 @@ def main():
                 if has_sdc0 and has_buildert2:
                     mine_units.append(unit_name)
                     print(f"  🕵️  Spy bomb: {unit_name}")
+                    continue
+
+                # EMP building explosion (selfdestructas = "empblast")
+                has_empblast = bool(re.search(r'\bselfdestructas\s*=\s*["\']?empblast["\']?', clean, re.IGNORECASE))
+                if has_empblast:
+                    mine_units.append(unit_name)
+                    print(f"  💥 EMP building: {unit_name}")
 
             except Exception as e:
                 print(f"  ⚠️  Could not check {unit_name}: {e}")
