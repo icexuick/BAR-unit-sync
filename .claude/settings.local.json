@@ -3,7 +3,11 @@
     "allow": [
       "Bash(python:*)",
       "mcp__claude_ai_Webflow__data_cms_tool",
-      "Bash(PYTHONIOENCODING=utf-8 python sync_weapons_to_webflow.py --unit armsptk --dry-run)"
+      "Bash(PYTHONIOENCODING=utf-8 python sync_weapons_to_webflow.py --unit armsptk --dry-run)",
+      "Bash(find d:/BAR/BAR-unit-sync -type d -name .github -o -type d -name cache -o -type d -name *cache*)",
+      "Bash(python3 -c \":*)",
+      "Bash(python3:*)",
+      "Bash(curl -s \"https://raw.githubusercontent.com/beyond-all-reason/Beyond-All-Reason/master/units/CorGantry/corjugg.lua\")"
     ]
   }
 }

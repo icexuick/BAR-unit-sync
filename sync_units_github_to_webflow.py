@@ -2491,7 +2491,7 @@ class UnitSyncService:
 
     def sync_all_units(self, dry_run: bool = False, auto_publish: bool = False,
                        sync_icons: bool = False, unit_filter: Optional[str] = None,
-                       faction_filter: Optional[str] = None):
+                       faction_filter: Optional[str] = None, force: bool = False):
         """
         Sync all units from GitHub to Webflow.
 
@@ -2501,6 +2501,7 @@ class UnitSyncService:
             sync_icons:  If True, also sync strategic icons from icontypes.lua
             unit_filter: If set, only sync this single unit (by name, e.g. 'armzeus')
             faction_filter: If set, only sync units whose name starts with this prefix (e.g. 'arm')
+            force:       If True, overwrite all units even if unchanged
         """
         print("=" * 80)
         print("Beyond All Reason - Unit Data Sync")
@@ -2855,7 +2856,7 @@ class UnitSyncService:
                     elif current_value != new_value:
                         changes[key] = {'old': current_value, 'new': new_value}
                 
-                if not changes:
+                if not changes and not force:
                     print(f"  ✓ Already up-to-date — no changes needed")
                     stats['skipped'] += 1
                     print()
@@ -3000,6 +3001,12 @@ Examples:
         type=str,
         help='Sync only units from a specific faction (e.g. arm, cor, leg, raptor)'
     )
+
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Overwrite all units in Webflow, even if unchanged'
+    )
     
     parser.add_argument(
         '--token',
@@ -3051,7 +3058,8 @@ Examples:
         auto_publish=auto_publish,
         sync_icons=args.sync_icons,
         unit_filter=args.unit,
-        faction_filter=args.faction
+        faction_filter=args.faction,
+        force=args.force
     )
 
 

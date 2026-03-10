@@ -1,0 +1,37 @@
+name: Sync All Weapons to Webflow (only new/changed)
+
+on:
+  schedule:
+    - cron: '0 4 * * 1'  # Every Monday at 4:00 AM UTC (1 hour after units)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run (preview only, no changes)'
+        required: false
+        default: 'false'
+        type: boolean
+      publish:
+        description: 'Auto-publish weapons immediately'
+        required: false
+        default: 'true'
+        type: boolean
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    - run: pip install -r requirements.txt
+    - name: Run weapons sync (only new/changed)
+      env:
+        WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
+      run: |
+        CMD="python sync_weapons_to_webflow.py --all"
+        [ "${{ inputs.dry_run }}" = "true" ] && CMD="$CMD --dry-run"
+        [ "${{ inputs.publish }}" = "true" ] && [ "${{ inputs.dry_run }}" != "true" ] && CMD="$CMD --publish"
+        echo "Running: $CMD"
+        $CMD
