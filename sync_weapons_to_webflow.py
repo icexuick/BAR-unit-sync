@@ -859,9 +859,10 @@ class WeaponParser:
                 return None
 
         def _bool(block, key):
-            m = re.search(rf'\b{key}\s*=\s*(true|false)', block, re.IGNORECASE)
+            m = re.search(rf'\b{key}\s*=\s*(true|false|1|0)\b', block, re.IGNORECASE)
             if m:
-                return m.group(1).lower() == 'true'
+                v = m.group(1).lower()
+                return v in ('true', '1')
             return False
 
         # Find the weapondef block — try WeaponDefs = { name = { ... } } first
@@ -987,18 +988,23 @@ class WeaponParser:
         targets = resolve_target_categories(otc)
         weapon_data.update(targets)
 
-        # Calculate DPS
+        # Calculate DPS or PPS
         has_damage = damage['default'] > 0 or damage['vtol'] > 0 or damage['subs'] > 0
         if has_damage and not is_bogus:
             reload = weapon_data['reload_time'] or 1.0
             dmg = damage['vtol'] if damage['vtol'] > damage['default'] else damage['default']
             if dmg > 0:
-                weapon_data['dps'] = round(
+                value = round(
                     (dmg * (1.0 / reload)) * weapon_data['_salvosize'] * weapon_data['burst'] * weapon_data['projectiles'],
                     1
                 )
+                if weapon_data['paralyzer']:
+                    weapon_data['pps'] = value
+                else:
+                    weapon_data['dps'] = value
 
-        print(f"  💣 Mine weapon: {weapon_data['full_name']} | type={weapon_data['weapon_type']} | DPS={weapon_data['dps']} | AOE={weapon_data['area_of_effect']}")
+        stat_label = f"PPS={weapon_data['pps']}" if weapon_data['paralyzer'] else f"DPS={weapon_data['dps']}"
+        print(f"  💣 Mine weapon: {weapon_data['full_name']} | type={weapon_data['weapon_type']} | {stat_label} | AOE={weapon_data['area_of_effect']}")
         return weapon_data
     
 class WeaponCategoryDetector:
@@ -1473,14 +1479,16 @@ class WeaponSyncService:
         # Strip Lua comments before parsing
         unit_content_clean = re.sub(r'--[^\n]*', '', unit_content)
 
-        # ── Detect if this is a mine or crawling bomb unit ───────────────────
-        # Both types use an external explodeas weapon — unitdef weapons are ignored.
+        # ── Detect if this is a mine, crawling bomb, or spy unit ─────────────
+        # All types use an external selfdestructas/explodeas weapon — unitdef weapons are ignored.
         #
         # Mine:          customparams { mine = true }
         # Crawling bomb: selfdestructcountdown = 0
         #                customparams { unitgroup = "explo", instantselfd = true }
+        # Spy bomb:      selfdestructcountdown = 0
+        #                customparams { unitgroup = "buildert2" }
 
-        is_explode_unit = False   # True for mines AND crawling bombs
+        is_explode_unit = False   # True for mines, crawling bombs AND spy units
         explodeas = None
 
         cp_match = re.search(r'\bcustomparams\s*=\s*\{', unit_content_clean, re.IGNORECASE)
@@ -1502,24 +1510,42 @@ class WeaponSyncService:
                 is_explode_unit = True
                 print(f"  💥 Crawling bomb detected")
 
+        # Spy bomb check (paralyze self-destruct)
+        if not is_explode_unit:
+            has_sdc0      = bool(re.search(r'\bselfdestructcountdown\s*=\s*0\b', unit_content_clean, re.IGNORECASE))
+            has_buildert2 = bool(cp_block and re.search(r'\bunitgroup\s*=\s*["\']+buildert2["\']+', cp_block, re.IGNORECASE))
+            if has_sdc0 and has_buildert2:
+                is_explode_unit = True
+                print(f"  🕵️  Spy bomb detected")
+
         if is_explode_unit:
+            # Prefer selfdestructas (contact/self-destruct explosion = higher damage)
+            # Fall back to explodeas (shot-down explosion) if not present
+            sda_match = re.search(r'\bselfdestructas\s*=\s*["\']+([\w]+)["\']+', unit_content_clean, re.IGNORECASE)
+            if not sda_match:
+                sda_match = re.search(r'\bselfdestructas\s*=\s*(\w+)', unit_content_clean, re.IGNORECASE)
+
             ea_match = re.search(r'\bexplodeas\s*=\s*["\']+([\w]+)["\']+', unit_content_clean, re.IGNORECASE)
             if not ea_match:
                 ea_match = re.search(r'\bexplodeas\s*=\s*(\w+)', unit_content_clean, re.IGNORECASE)
-            if ea_match:
+
+            if sda_match:
+                explodeas = sda_match.group(1)
+                print(f"     selfdestructas = {explodeas} (preferred over explodeas)")
+            elif ea_match:
                 explodeas = ea_match.group(1)
                 print(f"     explodeas = {explodeas}")
             else:
-                print(f"  ⚠️  Explode unit but no explodeas found — skipping weapon sync")
+                print(f"  ⚠️  Explode unit but no selfdestructas/explodeas found — skipping weapon sync")
                 return [], []
 
         # ── Parse weapons ──────────────────────────────────────────────────────
         if is_explode_unit and explodeas:
-            # Mine / crawling bomb: use ONLY the external explodeas weapon.
-            # All weapondefs inside the unitdef are ignored.
+            # Mine / crawling bomb: use ONLY the external selfdestructas weapon (preferred)
+            # or explodeas as fallback. All weapondefs inside the unitdef are ignored.
             mine_content = self.fetch_mine_weapon_file(explodeas)
             if not mine_content:
-                print(f"  ⚠️  Could not fetch explodeas weapon file for {explodeas}")
+                print(f"  ⚠️  Could not fetch weapon file for {explodeas}")
                 return [], []
             mine_weapon = WeaponParser.parse_mine_weapondef(mine_content, unit_name, explodeas)
             if not mine_weapon:
@@ -2025,6 +2051,13 @@ def main():
                 if has_sdc0 and has_explo and has_instant:
                     mine_units.append(unit_name)
                     print(f"  💥 Crawling bomb: {unit_name}")
+                    continue
+
+                # Spy bomb check (paralyze self-destruct)
+                has_buildert2 = bool(cp_block and re.search(r'\bunitgroup\s*=\s*["\']+buildert2["\']+', cp_block, re.IGNORECASE))
+                if has_sdc0 and has_buildert2:
+                    mine_units.append(unit_name)
+                    print(f"  🕵️  Spy bomb: {unit_name}")
 
             except Exception as e:
                 print(f"  ⚠️  Could not check {unit_name}: {e}")

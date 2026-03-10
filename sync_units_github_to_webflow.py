@@ -595,7 +595,10 @@ class LuaParser:
 
             # Skip weapons with 'bogus' or 'mine' in their name — always placeholders
             # Also skip if is_bogus flag is set in customparams
+            # Also skip 'detonator' weapons — contact-trigger weapons on crawling bombs (range=1, not real DPS)
             if 'bogus' in wd['def_name'] or 'mine' in wd['def_name'] or wd.get('is_bogus', False):
+                continue
+            if 'detonator' in def_key.lower():
                 continue
 
             # Track stockpile limit (typically only one weapon has this)

@@ -8,7 +8,9 @@
       "Bash(python3 -c \":*)",
       "Bash(python3:*)",
       "Bash(curl -s \"https://raw.githubusercontent.com/beyond-all-reason/Beyond-All-Reason/master/units/CorGantry/corjugg.lua\")",
-      "Bash(PYTHONIOENCODING=utf-8 python sync_weapons_to_webflow.py --unit corjugg)"
+      "Bash(PYTHONIOENCODING=utf-8 python sync_weapons_to_webflow.py --unit corjugg)",
+      "Bash(find d:/BAR/BAR-unit-sync -name *.lua)",
+      "Bash(curl -s \"https://raw.githubusercontent.com/beyond-all-reason/Beyond-All-Reason/master/units/ArmBots/T2/armvader.lua\")"
     ]
   }
 }
