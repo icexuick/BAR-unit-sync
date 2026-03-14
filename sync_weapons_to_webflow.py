@@ -1124,6 +1124,11 @@ class WeaponCategoryDetector:
         if is_railgun and wtype == 'LaserCannon':
             return self.category_map.get('railgun')
         
+        # Thermal Ordnance Generator (e.g. corkorg "Eradicator Heat Ray")
+        # Must check BEFORE heat-ray since the name also contains "heat ray"
+        if 'eradicator heat ray' in full_name.lower():
+            return self.category_map.get('thermal-ordnance-generator')
+
         # Heat Ray detection (MUST CHECK BEFORE general BeamLaser)
         # Multiple indicators: weapondef name, full name, BeamLaser type
         is_heatray = False
@@ -1242,9 +1247,12 @@ class WeaponCategoryDetector:
         if wtype == 'LightningCannon':
             return self.category_map.get('lightning-cannon')
         
-        # TorpedoLauncher
+        # TorpedoLauncher — homing → torpedo-launcher, dumb-fire → dumb-fire-torpedo-launcher
         if wtype == 'TorpedoLauncher':
-            return self.category_map.get('torpedo-launcher')
+            if weapon.get('homing', False):
+                return self.category_map.get('torpedo-launcher')
+            else:
+                return self.category_map.get('dumb-fire-torpedo-launcher')
         
         # Melee
         if wtype == 'Melee':

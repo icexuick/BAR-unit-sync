@@ -135,42 +135,46 @@ Categories are auto-detected in priority order. **First match wins.**
 
 | Priority | Category | Weapon Type | Conditions |
 |---|---|---|---|
-| 1 | **Trigger Explosive** | any | Unit is a mine (`customparams.mine=true`) OR crawling bomb |
-| 2 | **Anti-Nuke** | StarburstLauncher | `interceptor = 1` |
-| 3 | **Crush / Stomp** | Cannon | `range < 60` + `customparams.nofire = true` |
-| 4 | **Napalm Launcher** | Cannon | `customparams.area_onhit_damage` present |
-| 5 | **Cluster Plasma Cannon** | Cannon | `customparams.cluster_number` present |
-| 6 | **Sniper** | Cannon | `accuracy = 0` + `range > 800` + `damage > 250` |
-| 7 | **Railgun** | LaserCannon | `customparams.overpenetrate = true` |
-| 8 | **Heat Ray** | BeamLaser | `reload < 0.1` (continuous beam) |
-| 9 | **Tachyon Laser Beam** | BeamLaser | `reload ≥ 0.1` |
-| 10 | **Sea Laser Cannon** | LaserCannon | `waterweapon = true` |
-| 11 | **Nuclear Missile** | StarburstLauncher | `customparams.nuclear=1` + `commandfire=true` + `damage ≥ 8000` |
-| 12 | **Tactical Missile** | StarburstLauncher | `customparams.nuclear=1` + `commandfire=true` + `damage < 8000` |
-| 13 | **Missile Launcher** | MissileLauncher | — |
-| 14 | **Vertical Rocket Launcher** | StarburstLauncher | (all others) |
-| 15 | **Flak Cannon** | Cannon | `can_target_air` + flak color OR `'flak'` in name |
-| 16 | **Plasma Repeater** | Cannon | `burst ≥ 3` + `reload ≤ 0.7` |
-| 17 | **Plasma Shotgun** | Cannon | `projectiles ≥ 3` |
-| 18 | **Plasma Blast** | Cannon | `impulsefactor ≥ 0.5` |
-| 19 | **Cannon** | Cannon | (all others) |
-| 20 | **EMG Cannon** | EmgCannon | — |
-| 21 | **Plasma** | Plasma | — |
-| 22 | **Flamethrower** | Flame | — |
-| 23 | **Gatling Gun** | LaserCannon | `reload < 0.5` + `burst ≥ 3` |
-| 24 | **Shotgun Cannon** | LaserCannon | `projectiles ≥ 3` |
-| 25 | **Laser Cannon** | LaserCannon | (all others) |
-| 26 | **Lightning Cannon** | LightningCannon | — |
-| 27 | **Torpedo** | TorpedoLauncher | — |
-| 28 | **Shield** | Shield | — |
-| 29 | **Aircraft EMP Bomb** | AircraftBomb | `paralyzer = true` |
-| 30 | **Aircraft Bomb** | AircraftBomb | — |
-| 31 | **D-Gun** | DGun | — |
-| 32 | **Melee** | Melee | — |
+| 1 | **Trigger EMP** | any | Explode unit (`_is_mine`) + `paralyzer = true` (spy bombs, EMP buildings) |
+| 2 | **Trigger Explosive** | any | Explode unit (`_is_mine`) without paralyzer (crawling bombs, mines) |
+| 3 | **Anti-Nuke** | StarburstLauncher | `interceptor = 1` |
+| 4 | **Crush / Stomp** | Cannon | `range < 60` + `customparams.nofire = true` |
+| 5 | **Napalm Launcher** | Cannon | `customparams.area_onhit_damage` present |
+| 6 | **Cluster Plasma Cannon** | Cannon | `customparams.cluster_number` present |
+| 7 | **Sniper** | Cannon | `accuracy = 0` + `range > 800` + `damage > 250` |
+| 8 | **Railgun** | LaserCannon | `customparams.overpenetrate = true` |
+| 9 | **Heat Ray** | BeamLaser | `reload < 0.1` (continuous beam) |
+| 10 | **Tachyon Laser Beam** | BeamLaser | `reload ≥ 0.1` |
+| 11 | **Sea Laser Cannon** | LaserCannon | `waterweapon = true` |
+| 12 | **Nuclear Missile** | StarburstLauncher | `customparams.nuclear=1` + `commandfire=true` + `damage ≥ 8000` |
+| 13 | **Tactical Missile** | StarburstLauncher | `customparams.nuclear=1` + `commandfire=true` + `damage < 8000` |
+| 14 | **Missile Launcher** | MissileLauncher | `tracks = true` (homing) |
+| 15 | **Rocket Launcher** | MissileLauncher | `tracks = false` (non-homing) |
+| 16 | **Vertical Rocket Launcher** | StarburstLauncher | (all others) |
+| 17 | **Flak Cannon** | Cannon | `can_target_air` + flak color OR `'flak'` in name |
+| 18 | **Plasma Repeater** | Cannon | `burst ≥ 3` + `reload ≤ 0.7` |
+| 19 | **Plasma Shotgun** | Cannon | `projectiles ≥ 3` |
+| 20 | **Plasma Blast** | Cannon | `impulsefactor ≥ 0.5` |
+| 21 | **Cannon** | Cannon | (all others) |
+| 22 | **EMG Cannon** | EmgCannon | — |
+| 23 | **Plasma** | Plasma | — |
+| 24 | **Flamethrower** | Flame | — |
+| 25 | **Gatling Gun** | LaserCannon | `reload < 0.5` + `burst ≥ 3` |
+| 26 | **Shotgun Cannon** | LaserCannon | `projectiles ≥ 3` |
+| 27 | **Laser Cannon** | LaserCannon | (all others) |
+| 28 | **Lightning Cannon** | LightningCannon | — |
+| 29 | **Torpedo** | TorpedoLauncher | `tracks = true` (homing) |
+| 29b | **Dumb-fire Torpedo** | TorpedoLauncher | `tracks = false` or absent (unguided) |
+| 30 | **Shield** | Shield | — |
+| 31 | **Aircraft EMP Bomb** | AircraftBomb | `paralyzer = true` |
+| 32 | **Aircraft Bomb** | AircraftBomb | — |
+| 33 | **D-Gun** | DGun | `'disintegrator'` in weapondef key name |
+| 34 | **Disintegrator Cannon** | DGun | `weapontype = DGun` but NOT a disintegrator beam (e.g. corjugg) |
+| 35 | **Melee** | Melee | — |
 
 ---
 
-## 💣 Mine & Crawling Bomb Detection
+## 💣 Mine, Crawling Bomb & Explode Unit Detection
 
 These unit types have **no real weapondefs** in their unit file — their explosion weapon lives in an external file under `weapons/`. The script detects them and fetches the correct weapon file automatically.
 
@@ -183,12 +187,33 @@ Detected when **all three** of these are present:
 - `customparams.unitgroup = "explo"`
 - `customparams.instantselfd = true`
 
+Examples: `armvader`, `corroach`, `corsktl`, `legsnapper`
+
+### Spy Bomb
+Detected when **both** of these are present:
+- `selfdestructcountdown = 0` (root level)
+- `customparams.unitgroup = "buildert2"`
+
+Uses the `SPYBOMBX` paralyzer weapon (EMP self-destruct). Assigned **Trigger EMP** category.
+
+Examples: `armspy`, `corspy`, `legaspy`
+
+### EMP Building
+Detected when `selfdestructas = "empblast"` is present in the unitdef.
+
+Uses the `empblast` paralyzer weapon from `Unit_Explosions.lua`. Assigned **Trigger EMP** category.
+
+Examples: `armamex`
+
+### selfdestructas preferred over explodeas
+For all explode unit types, **`selfdestructas` is always preferred** over `explodeas` when both are present — `selfdestructas` is the contact/self-destruct explosion (higher damage), while `explodeas` is only the shot-down explosion.
+
 ### How it works
-1. Reads `explodeas = "CRAWL_BLASTSML"` from the unit file
-2. Tries `weapons/crawl_blastsml.lua` directly (fast path)
-3. If not found: scans all `.lua` files in `weapons/` to build an index, then looks up which file contains `crawl_blastsml` (slow path, cached for the rest of the run)
+1. Checks for `selfdestructas` first, falls back to `explodeas`
+2. Tries `weapons/<key>.lua` directly (fast path)
+3. If not found: scans all `.lua` files in `weapons/` to build an index, then looks up which file contains the key (slow path, cached for the rest of the run)
 4. Parses the weapondef from that file
-5. Assigns **Trigger Explosive** category
+5. Assigns **Trigger EMP** (if paralyzer) or **Trigger Explosive** (otherwise)
 6. All weapondefs in the unitdef itself are ignored
 
 ---
@@ -205,6 +230,7 @@ A weapon is skipped if any of the following is true:
 - `customparams.bogus = 1`
 - `'bogus'` appears in the weapondef key name
 - `'mine'` appears in the weapondef key name
+- `'detonator'` appears in the weapondef key name (contact-trigger weapons on crawling bombs, `range = 1`)
 
 **Exception:** Crush/stomp weapons are never skipped even if flagged bogus.
 

@@ -171,16 +171,30 @@ python sync_units_github_to_webflow.py --clear-cache
 
 ---
 
-## 📖 Command Line Reference
+## 📖 Command Line Reference — Units sync
 
 | Flag | Description |
 |---|---|
 | `--dry-run` | Preview changes without updating Webflow |
 | `--unit NAME` | Sync only one specific unit, e.g. `--unit armzeus` |
+| `--faction NAME` | Sync only units from one faction, e.g. `--faction arm` |
+| `--force` | Overwrite all units in Webflow even if unchanged |
 | `--publish` | Automatically publish updated items after sync |
 | `--sync-icons` | Also sync strategic icons (PNG → WebP, requires icontypes.lua parsing) |
 | `--clear-cache` | Delete local cache files and re-fetch everything from GitHub |
 | `--token TOKEN` | Provide Webflow API token via command line |
+| `--help` | Show help message |
+
+## 📖 Command Line Reference — Weapons sync
+
+| Flag | Description |
+|---|---|
+| `--dry-run` | Preview changes without updating Webflow |
+| `--unit NAME` | Sync weapons for one specific unit, e.g. `--unit armcom` |
+| `--all` | Sync weapons for all units in Webflow |
+| `--mines` | Sync mine/crawling bomb/spy/EMP-building units only |
+| `--publish` | Automatically publish weapons immediately after sync |
+| `--cleanup` | Archive zero-damage weapons from previous syncs |
 | `--help` | Show help message |
 
 ---
@@ -230,6 +244,7 @@ The formula uses `dmg_vtol` when it is higher than `dmg_default`, matching the g
 - Both `dmg_default` and `dmg_vtol` are zero or absent
 - `customparams.bogus = 1` (bogus flag in customparams)
 - `customparams.smart_backup = true` (alternative fire mode — excluded from unit DPS total)
+- Its weapondef key contains `detonator` (contact-trigger on crawling bombs, `range = 1`)
 
 **EMP / paralyzer weapons** (`paralyzer = true`) appear in the `weapons` field with an `EMP-` prefix (e.g. `EMP-BeamLaser`) but do **not** contribute to the DPS value — they paralyse, not damage.
 
@@ -357,36 +372,21 @@ Errors                : 0
 
 ### GitHub Actions
 
-Create `.github/workflows/sync.yml`:
+Five pre-configured workflows are included in `.github/workflows/`:
 
-```yaml
-name: Sync BAR Units to Webflow
+| Workflow | Trigger | Description |
+|---|---|---|
+| `sync-units-changed.yml` | Weekly (Mon 3:00 UTC) + manual | Units sync — only new/changed |
+| `sync-units-overwrite.yml` | Manual only | Units sync — force overwrite all (`--force`) |
+| `sync-units-icons.yml` | Manual only | Units + strategic icons — force overwrite |
+| `sync-weapons-changed.yml` | Weekly (Mon 4:00 UTC) + manual | Weapons sync — all units |
+| `sync-weapons-overwrite.yml` | Manual only | Weapons sync — all units |
 
-on:
-  schedule:
-    - cron: '0 3 * * *'   # every day at 03:00 UTC
-  workflow_dispatch:       # allow manual trigger
+Run any workflow from **GitHub → Actions tab → select workflow → Run workflow**.
 
-jobs:
-  sync:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
+All workflows support a `dry_run` toggle (preview without writing) and a `publish` toggle.
 
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - run: pip install -r requirements.txt
-
-      - name: Run sync
-        env:
-          WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python sync_units_github_to_webflow.py --publish
-```
-
-Add `WEBFLOW_API_TOKEN` and optionally `GITHUB_TOKEN` to **Settings → Secrets and variables → Actions** in your repository.
+Add `WEBFLOW_API_TOKEN` to **Settings → Secrets and variables → Actions** in your repository.
 
 ### Cron job (Linux / Mac)
 
