@@ -61,6 +61,7 @@ FACTION_MAP = {
     "cor":    {"id": "6564c6553676389f8ba46321", "name": "Cortex"},
     "leg":    {"id": "684fc7cd5025549eba34c053", "name": "Legion"},
     "raptor": {"id": "6564c6553676389f8ba4631f", "name": "CHICKS"},
+    "scav":   {"id": "6564c6553676389f8ba461dc", "name": "SCAV"},
 }
 
 # Units that are always synced regardless of buildoptions
@@ -796,7 +797,10 @@ class LuaParser:
         """
         try:
             unit_data = {}
-            
+
+            # Strip Lua line comments so commented-out values are never picked up
+            content = re.sub(r'--[^\n]*', '', content)
+
             # Find the unit definition start using balanced brace extraction
             unit_pattern = rf"{unit_name}\s*=\s*\{{"
             match = re.search(unit_pattern, content)
@@ -1690,17 +1694,25 @@ class UnitSyncService:
         self._unit_paths_map    = {}  # { unit_name: 'units/path/unit.lua' } — from cache/archive
         self._webflow_id_map    = {}  # { unit_name: webflow_item_id }       — built from Webflow items
     
-    def detect_faction(self, unit_name: str) -> Optional[Dict]:
+    def detect_faction(self, unit_name: str, file_path: str = '') -> Optional[Dict]:
         """
-        Detect faction based on unit name prefix.
+        Detect faction based on unit name prefix or file path.
         Returns dict with 'id' and 'name', or None if unknown.
-        
+
+        Scavenger units (path contains 'Scavengers') always get SCAV faction,
+        regardless of their name prefix (e.g. armafust3 → SCAV, not Armada).
+
         Prefixes:
           arm    → Armada
           cor    → Cortex
           leg    → Legion
           raptor → CHICKS
+          scav   → SCAV
         """
+        # Scavenger units detected by path (overrides name prefix)
+        if 'scavengers' in file_path.lower():
+            return FACTION_MAP.get('scav')
+
         name = unit_name.lower()
         # Check longest prefix first (raptor before any 3-letter prefix)
         for prefix in sorted(FACTION_MAP.keys(), key=len, reverse=True):
@@ -1987,6 +1999,9 @@ class UnitSyncService:
         # Handle amphibious (boolean, derived from movement type)
         if 'amphibious' in github_data:
             webflow_fields['amphibious'] = bool(github_data['amphibious'])
+
+        # Handle is-scavenger (boolean, derived from file path)
+        webflow_fields['is-scavenger'] = 'scavengers' in github_data.get('_file_path', '').lower()
         
         # Handle unit name from language file (plain text field)
         if 'unitname' in github_data and github_data['unitname']:
@@ -1998,8 +2013,9 @@ class UnitSyncService:
         
         # Handle faction reference field
         unit_name = github_data.get('_unit_name', '')
+        unit_file_path = github_data.get('_file_path', '')
         if unit_name:
-            faction = self.detect_faction(unit_name)
+            faction = self.detect_faction(unit_name, file_path=unit_file_path)
             if faction:
                 webflow_fields['faction-ref'] = faction['id']
 
@@ -2360,12 +2376,21 @@ class UnitSyncService:
                     # Determine cantbetransported:
                     # Engine rules (UnitDef.cpp + Unit.cpp):
                     #   aircraft (canfly = true) → ALWAYS not transportable (BAR has transportAir disabled)
+                    #   ships/subs (BOAT/SHIP/UBOAT/SUB movementclass) → NEVER transportable
                     #   structures (no movementclass) → not transportable by default
                     #   mobile ground units → transportable by default
                     # Explicit cantbetransported = true/false overrides the default for ground units
-                    # and structures, but NOT for aircraft — those are never transportable in BAR.
+                    # and structures, but NOT for aircraft or ships.
                     is_aircraft = bool(has_canfly)
+                    mc_val = ''
+                    if has_moveclass:
+                        mc_match = re.search(r'\bmovementclass\s*=\s*["\']?(\w+)', clean, re.IGNORECASE)
+                        if mc_match:
+                            mc_val = mc_match.group(1).upper()
+                    is_ship_or_sub = any(kw in mc_val for kw in ('BOAT', 'SHIP', 'UBOAT', 'SUB')) and 'HOVER' not in mc_val
                     if is_aircraft:
+                        cant_transport = True
+                    elif is_ship_or_sub:
                         cant_transport = True
                     elif cbt_true:
                         cant_transport = True
@@ -2494,7 +2519,8 @@ class UnitSyncService:
 
     def sync_all_units(self, dry_run: bool = False, auto_publish: bool = False,
                        sync_icons: bool = False, unit_filter: Optional[str] = None,
-                       faction_filter: Optional[str] = None, force: bool = False):
+                       faction_filter: Optional[str] = None, force: bool = False,
+                       scavengers: bool = False):
         """
         Sync all units from GitHub to Webflow.
 
@@ -2505,6 +2531,7 @@ class UnitSyncService:
             unit_filter: If set, only sync this single unit (by name, e.g. 'armzeus')
             faction_filter: If set, only sync units whose name starts with this prefix (e.g. 'arm')
             force:       If True, overwrite all units even if unchanged
+            scavengers:  If True, sync Scavenger units instead of regular buildable units
         """
         print("=" * 80)
         print("Beyond All Reason - Unit Data Sync")
@@ -2562,30 +2589,44 @@ class UnitSyncService:
         print(f"Found {len(unit_files)} unit files")
         print()
 
-        # Step 1b: Build the set of all buildable units by downloading
-        # the entire units/ folder in one request (GitHub tarball/zipball API).
-        # This is MUCH faster than fetching each file individually.
-        print("Step 1b: Building buildable-units index (downloading repo archive)...")
-        all_buildable = self._build_buildable_set_from_archive()
-        if all_buildable:
-            # Always include whitelisted units even if not in any buildoptions
-            whitelisted_present = [uf for uf in unit_files if uf['name'] in SYNC_WHITELIST]
-            buildable_files    = [uf for uf in unit_files
-                                  if uf['name'] in all_buildable or uf['name'] in SYNC_WHITELIST]
-            unbuildable_files  = [uf for uf in unit_files
-                                  if uf['name'] not in all_buildable and uf['name'] not in SYNC_WHITELIST]
-
-            print(f"  {len(all_buildable)} unique buildable units found")
-            if whitelisted_present:
-                print(f"  ⭐ Whitelist exceptions always included:")
-                for uf in sorted(whitelisted_present, key=lambda x: x['name']):
-                    in_buildable = "already in buildoptions" if uf['name'] in all_buildable else "not in buildoptions"
-                    print(f"     ✅ {uf['name']}  ({in_buildable})")
-            print(f"  Keeping {len(buildable_files)} units,"
-                  f" skipping {len(unbuildable_files)} unbuildable")
-            unit_files = buildable_files
+        # Step 1b: Filter units based on mode (regular buildable or scavengers)
+        if scavengers:
+            # Scavenger mode: only include units from units/Scavengers/ path
+            scav_files = [uf for uf in unit_files if 'scavengers' in uf.get('path', '').lower()]
+            print(f"Step 1b: Scavenger mode — selecting units from units/Scavengers/")
+            print(f"  Found {len(scav_files)} scavenger units")
+            unit_files = scav_files
+            all_buildable = set(uf['name'] for uf in scav_files)  # treat all scav units as "buildable"
         else:
-            print("  ⚠️  Could not determine buildable units — syncing all units")
+            # Regular mode: build the set of all buildable units by downloading
+            # the entire units/ folder in one request (GitHub tarball/zipball API).
+            print("Step 1b: Building buildable-units index (downloading repo archive)...")
+            all_buildable = self._build_buildable_set_from_archive()
+            if all_buildable:
+                # Also protect scavenger units from being archived
+                scav_names = set(uf['name'] for uf in unit_files if 'scavengers' in uf.get('path', '').lower())
+                all_buildable = all_buildable | scav_names
+                if scav_names:
+                    print(f"  🛡️  Protected {len(scav_names)} scavenger units from archiving")
+
+                # Always include whitelisted units even if not in any buildoptions
+                whitelisted_present = [uf for uf in unit_files if uf['name'] in SYNC_WHITELIST]
+                buildable_files    = [uf for uf in unit_files
+                                      if uf['name'] in all_buildable or uf['name'] in SYNC_WHITELIST]
+                unbuildable_files  = [uf for uf in unit_files
+                                      if uf['name'] not in all_buildable and uf['name'] not in SYNC_WHITELIST]
+
+                print(f"  {len(all_buildable)} unique buildable units found")
+                if whitelisted_present:
+                    print(f"  ⭐ Whitelist exceptions always included:")
+                    for uf in sorted(whitelisted_present, key=lambda x: x['name']):
+                        in_buildable = "already in buildoptions" if uf['name'] in all_buildable else "not in buildoptions"
+                        print(f"     ✅ {uf['name']}  ({in_buildable})")
+                print(f"  Keeping {len(buildable_files)} units,"
+                      f" skipping {len(unbuildable_files)} unbuildable")
+                unit_files = buildable_files
+            else:
+                print("  ⚠️  Could not determine buildable units — syncing all units")
         print()
 
         # Apply faction filter if requested (--faction arm)
@@ -2633,41 +2674,44 @@ class UnitSyncService:
         
         print()
         
-        # Step 2b: Unpublish items not in buildable tree
-        print("Step 2b: Checking for published items not in commander build tree...")
-        unpublish_count = 0
-        unpublished_examples = []
-        
-        for unit_name, item in webflow_lookup.items():
-            # Check if this item is already archived
-            is_archived = item.get('isArchived', False)
-            
-            # Skip if already archived
-            if is_archived:
-                continue
-            
-            # Check if unit is NOT in buildable tree
-            if unit_name not in all_buildable:
-                unpublish_count += 1
-                unpublished_examples.append(unit_name)
-                
-                if dry_run:
-                    print(f"  🔍 Would archive (unpublish): {unit_name}")
-                else:
-                    print(f"  📦 Archiving: {unit_name}")
-                    # Archive the item (fully unpublish)
-                    success = self.webflow.unpublish_item(item['id'])
-                    if not success:
-                        print(f"     ⚠️  Failed to archive {unit_name}")
-        
-        if unpublish_count == 0:
-            print("  ✅ All published items are in the commander build tree")
+        # Step 2b: Unpublish items not in buildable tree (skip in scavenger mode)
+        if scavengers:
+            print("Step 2b: Skipped (scavenger mode — no unpublishing)")
         else:
-            action = "Would archive" if dry_run else "Archived"
-            print(f"  ✅ {action} {unpublish_count} items not in build tree")
-            if unpublished_examples[:5]:
-                print(f"     Examples: {', '.join(unpublished_examples[:5])}")
-        
+            print("Step 2b: Checking for published items not in commander build tree...")
+            unpublish_count = 0
+            unpublished_examples = []
+
+            for unit_name, item in webflow_lookup.items():
+                # Check if this item is already archived
+                is_archived = item.get('isArchived', False)
+
+                # Skip if already archived
+                if is_archived:
+                    continue
+
+                # Check if unit is NOT in buildable tree
+                if unit_name not in all_buildable:
+                    unpublish_count += 1
+                    unpublished_examples.append(unit_name)
+
+                    if dry_run:
+                        print(f"  🔍 Would archive (unpublish): {unit_name}")
+                    else:
+                        print(f"  📦 Archiving: {unit_name}")
+                        # Archive the item (fully unpublish)
+                        success = self.webflow.unpublish_item(item['id'])
+                        if not success:
+                            print(f"     ⚠️  Failed to archive {unit_name}")
+
+            if unpublish_count == 0:
+                print("  ✅ All published items are in the commander build tree")
+            else:
+                action = "Would archive" if dry_run else "Archived"
+                print(f"  ✅ {action} {unpublish_count} items not in build tree")
+                if unpublished_examples[:5]:
+                    print(f"     Examples: {', '.join(unpublished_examples[:5])}")
+
         print()
         
         # Step 3: Process each unit
@@ -2682,6 +2726,7 @@ class UnitSyncService:
             'unittype':            'Unit Type        ',
             'techlevel':           'Techlevel        ',
             'amphibious':          'Amphibious       ',
+            'is-scavenger':        'Is Scavenger     ',
             'buildoptions-ref':    'Buildoptions     ',
             'dps':                 'DPS              ',
             'weaponrange':         'Weapon Range     ',
@@ -2741,8 +2786,9 @@ class UnitSyncService:
                 print()
                 continue
             
-            # Store unit_name inside github_data so map_github_to_webflow_fields can use it
+            # Store unit_name and file_path inside github_data so map_github_to_webflow_fields can use it
             github_data['_unit_name'] = unit_name
+            github_data['_file_path'] = file_path
             
             # Detect amphibious status using loaded movement classes
             github_data['amphibious'] = self.detect_amphibious(github_data)
@@ -3010,6 +3056,12 @@ Examples:
         action='store_true',
         help='Overwrite all units in Webflow, even if unchanged'
     )
+
+    parser.add_argument(
+        '--scavengers',
+        action='store_true',
+        help='Sync Scavenger units (units/Scavengers/) instead of regular buildable units'
+    )
     
     parser.add_argument(
         '--token',
@@ -3062,7 +3114,8 @@ Examples:
         sync_icons=args.sync_icons,
         unit_filter=args.unit,
         faction_filter=args.faction,
-        force=args.force
+        force=args.force,
+        scavengers=args.scavengers
     )
 
 

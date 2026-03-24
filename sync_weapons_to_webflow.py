@@ -393,6 +393,8 @@ class WeaponParser:
             wblock = LuaParser.extract_balanced_braces(wd_block, wm.end() - 1)
             if not wblock:
                 continue
+            # Strip Lua line comments so commented-out values (e.g. -- burst = 3) are ignored
+            wblock = re.sub(r'--[^\n]*', '', wblock)
             
             # Parse damage block
             damage = WeaponParser.parse_damage_block(wblock)
@@ -885,6 +887,9 @@ class WeaponParser:
         if not wblock:
             print(f"  ⚠️  Could not find weapondef block '{weapondef_key}' in mine weapon file")
             return None
+
+        # Strip Lua line comments so commented-out values are ignored
+        wblock = re.sub(r'--[^\n]*', '', wblock)
 
         # Parse damage block
         damage = WeaponParser.parse_damage_block(wblock)
@@ -1571,7 +1576,7 @@ class WeaponSyncService:
             weapons = [mine_weapon]
         else:
             # Normal unit: parse weapondefs from the unit file
-            weapons = WeaponParser.parse_weapondefs(unit_content, unit_name)
+            weapons = WeaponParser.parse_weapondefs(unit_content_clean, unit_name)
 
         if not weapons:
             print(f"  ℹ️  No weapons found")
@@ -1710,6 +1715,7 @@ class WeaponSyncService:
                 # Fetch drone unit file and parse its weapons for DPS/damage stats
                 drone_content = self.fetch_unit_file(carried_name)
                 if drone_content:
+                    drone_content = re.sub(r'--[^\n]*', '', drone_content)
                     drone_weapons = WeaponParser.parse_weapondefs(drone_content, carried_name)
                     if drone_weapons:
                         # Use first real damage-dealing weapon from drone

@@ -3,36 +3,50 @@
 [![License: BAR Only](https://img.shields.io/badge/License-BAR%20Only-red.svg)](LICENSE)
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
 
-Automatically sync unit data from the [Beyond All Reason GitHub repository](https://github.com/beyond-all-reason/Beyond-All-Reason) to your Webflow CMS Units collection.
+Automatically sync unit and weapon data from the [Beyond All Reason GitHub repository](https://github.com/beyond-all-reason/Beyond-All-Reason) to your Webflow CMS collections.
 
 ---
 
 ## 🎯 Features
 
-- ✅ Syncs **41 fields** total: 22 direct stats + 13 computed + 4 references + 2 images
+### Unit Sync (`sync_units_github_to_webflow.py`)
+- ✅ Syncs **42 fields** total: 22 direct stats + 14 computed + 4 references + 2 images
 - ✅ **Auto-creates new units** as drafts in Webflow when they don't exist yet
 - ✅ Only syncs **buildable units** (recursive tree from commanders: armcom, corcom, legcom)
-- ✅ **Auto-unpublishes** units not in commander tree (sets published items to draft)
-- ✅ Parses unit definitions and extracts all relevant fields
+- ✅ **Scavenger mode** — sync all 88 unique Scavenger units separately (`--scavengers`)
+- ✅ Scavenger units are **protected from archiving** during regular syncs
+- ✅ **Auto-archives** units not in commander tree or Scavenger set
 - ✅ Calculates **DPS** using BAR's official formula (damage × reload × salvo × burst × projectiles)
-- ✅ Detects **weapon types** and filters out zero-damage/unequipped weapons
+- ✅ Detects **weapon types** and filters out zero-damage/unequipped/detonator weapons
 - ✅ Detects **special abilities** (Radar, Stealth, Shield, Transport, Resurrector, etc.)
-- ✅ Detects **faction** (Armada, Cortex, Legion, CHICKS) from unit filename prefix
+- ✅ Detects **faction** (Armada, Cortex, Legion, CHICKS, SCAV) from filename prefix or path
 - ✅ Detects **unit type** (Aircraft, Bot, Vehicle, Ship, Hovercraft, Building, Defense, Factory, Chicken)
 - ✅ Detects **amphibious** units using BAR's official `alldefs_post.lua` logic
+- ✅ Computes **transport compatibility** — ships and subs are never transportable, hovercraft are
 - ✅ Resolves **buildoptions** to Webflow item IDs (multi-reference field)
 - ✅ Syncs **unit names and tooltips** from `language/en/units.json`
-- ✅ Syncs **strategic icons** (PNG → WebP) — committed to GitHub, linked in Webflow
-- ✅ Syncs **buildpics** (DDS → WebP) — always enabled when GITHUB_TOKEN is set
+- ✅ Syncs **strategic icons** (PNG → WebP) and **buildpics** (DDS → WebP) via GitHub hosting
 - ✅ Updates **only fields that have changed** — skips untouched units
-- ✅ Dry-run mode to preview changes without writing to Webflow
-- ✅ Optional auto-publishing of updated items
-- ✅ Single-unit mode for testing (`--unit armzeus`)
-- ✅ Detailed console output with readable field names
+- ✅ `--force` mode to overwrite all units regardless of changes
+- ✅ **Lua comment stripping** — `--` commented values are correctly ignored everywhere
+- ✅ Default `techlevel = 1` for units without an explicit tech level
+
+### Weapon Sync (`sync_weapons_to_webflow.py`)
+- ✅ Syncs each weapon as a separate CMS item with full stats and auto-detected category
+- ✅ **37 weapon categories** auto-detected (see [WEAPONS_README.md](WEAPONS_README.md))
+- ✅ Detects **mines, crawling bombs, spy bombs, and EMP buildings** from external weapon files
+- ✅ Prefers `selfdestructas` over `explodeas` for correct alpha damage
+- ✅ Splits **missiles** into homing (Missile Launcher) vs unguided (Rocket Launcher)
+- ✅ Splits **torpedoes** into homing (Torpedo Launcher) vs unguided (Dumb-fire Torpedo)
+- ✅ Detects **Trigger EMP** (paralyzer explosions) vs **Trigger Explosive** (damage explosions)
+- ✅ Detects **Disintegrator Cannon** (DGun weapontype, non-disintegrator beam)
+- ✅ Special detection for **Eradicator Heat Ray** → Thermal Ordnance Generator category
+- ✅ Calculates **DPS, PPS** (paralyze per second), and **DOT** (damage over time)
+- ✅ Supports **drone carriers** — fetches drone DPS and links carried unit
 
 ---
 
-## 📊 Synced Fields (36 total)
+## 📊 Synced Unit Fields
 
 ### Direct fields (from `.lua` unit file)
 
@@ -57,7 +71,7 @@ Automatically sync unit data from the [Beyond All Reason GitHub repository](http
 | `cloakcost` | `cloak-cost` | Number |
 | `cloakcostmoving` | `cloak-cost-moving` | Number |
 | `customparams.paralyzemultiplier` | `paralyze-multiplier` | Number |
-| `customparams.techlevel` | `techlevel` | Number |
+| `customparams.techlevel` | `techlevel` | Number (defaults to 1) |
 | `customparams.energyconv_capacity` | `converter-metal-make` | Number (metal maker output) |
 | `customparams.energyconv_efficiency` | `converter-efficiency` | Number (metal maker efficiency) |
 
@@ -67,16 +81,18 @@ Automatically sync unit data from the [Beyond All Reason GitHub repository](http
 |---|---|---|---|
 | Unit display name | `unitname` | PlainText | From `language/en/units.json` |
 | Tooltip | `tooltip` | PlainText | From `language/en/units.json` |
-| Faction | `faction-ref` | Reference | Filename prefix: `arm` → Armada, `cor` → Cortex, `leg` → Legion, `raptor` → CHICKS |
+| Faction | `faction-ref` | Reference | Filename prefix or Scavengers path → SCAV |
 | Unit Type | `unittype` | Reference | Detected from `movementclass`, `canfly`, speed, builder flags, weapondefs |
 | Amphibious | `amphibious` | Switch | Based on BAR's `alldefs_post.lua` movement class lists |
+| Is Scavenger | `is-scavenger` | Switch | `true` if unit file is in `units/Scavengers/` |
 | Buildoptions | `buildoptions-ref` | MultiReference | Units this unit can build, resolved to Webflow item IDs |
+| Transportable By | `transportable-by` | MultiReference | Same-faction transports that can carry this unit |
 | DPS | `dps` | Number | `(max(dmg_vtol, dmg_default) × (1/reload)) × salvosize × burst × projectiles` |
 | Weapon Range | `weaponrange` | Number | Highest range across all equipped non-bogus weapons |
 | Weapons | `weapons` | PlainText | e.g. `LaserCannon, 2x MissileLauncher, EMP-BeamLaser` |
-| Stockpile Limit | `stockpile-limit` | Number | From `weapondefs.<n>.customparams.stockpilelimit` (if weapon has stockpile) |
-| Max Impulse | `weapon-max-impulse` | Number (2 decimals) | Highest `impulsefactor` from damage-dealing weapons (knockback force) |
-| Max Area of Effect | `weapon-area-of-effect` | Number (integer) | Highest `areaofeffect` from damage-dealing weapons (splash radius) |
+| Stockpile Limit | `stockpile-limit` | Number | From `weapondefs.<n>.customparams.stockpilelimit` |
+| Max Impulse | `weapon-max-impulse` | Number | Highest `impulsefactor` from damage-dealing weapons |
+| Max Area of Effect | `weapon-area-of-effect` | Number | Highest `areaofeffect` from damage-dealing weapons |
 | Specials | `specials` | PlainText | Comma-separated special abilities (see below) |
 
 ### Images (synced via GitHub hosting)
@@ -146,27 +162,48 @@ python sync_units_github_to_webflow.py --dry-run
 **Test a single unit:**
 ```bash
 python sync_units_github_to_webflow.py --unit armzeus --dry-run
-python sync_units_github_to_webflow.py --unit armzeus
+python sync_units_github_to_webflow.py --unit armzeus --publish
 ```
 
 **Full sync (includes buildpics automatically):**
 ```bash
-python sync_units_github_to_webflow.py
-```
-
-**Sync with strategic icons (requires --sync-icons flag):**
-```bash
-python sync_units_github_to_webflow.py --sync-icons
-```
-
-**Sync and auto-publish:**
-```bash
 python sync_units_github_to_webflow.py --publish
+```
+
+**Sync with strategic icons:**
+```bash
+python sync_units_github_to_webflow.py --sync-icons --publish
+```
+
+**Sync only one faction:**
+```bash
+python sync_units_github_to_webflow.py --faction arm --publish
+```
+
+**Sync Scavenger units:**
+```bash
+python sync_units_github_to_webflow.py --scavengers --publish
+python sync_units_github_to_webflow.py --scavengers --sync-icons --publish
+```
+
+**Force overwrite all units (skip change detection):**
+```bash
+python sync_units_github_to_webflow.py --force --publish
 ```
 
 **Clear cache and force a full re-fetch from GitHub:**
 ```bash
 python sync_units_github_to_webflow.py --clear-cache
+```
+
+**Sync weapons for all units:**
+```bash
+python sync_weapons_to_webflow.py --all --publish
+```
+
+**Sync weapons for a single unit:**
+```bash
+python sync_weapons_to_webflow.py --unit armcom --publish
 ```
 
 ---
@@ -178,6 +215,7 @@ python sync_units_github_to_webflow.py --clear-cache
 | `--dry-run` | Preview changes without updating Webflow |
 | `--unit NAME` | Sync only one specific unit, e.g. `--unit armzeus` |
 | `--faction NAME` | Sync only units from one faction, e.g. `--faction arm` |
+| `--scavengers` | Sync Scavenger units (`units/Scavengers/`) instead of regular buildable units |
 | `--force` | Overwrite all units in Webflow even if unchanged |
 | `--publish` | Automatically publish updated items after sync |
 | `--sync-icons` | Also sync strategic icons (PNG → WebP, requires icontypes.lua parsing) |
@@ -209,12 +247,13 @@ Caches individual unit `.lua` file contents fetched from GitHub.
 - **Subsequent runs**: loads from cache instantly ⚡
 
 ### `.buildable_cache.json`
-Built once by downloading the entire BAR repository as a ZIP archive and scanning all unit files. Stores two indexes:
+Built once by downloading the entire BAR repository as a ZIP archive and scanning all unit files. Stores:
 
 - `buildable` — set of unit names **reachable from commanders** via recursive build tree
 - `buildoptions_map` — maps each unit name to the list of units it can build
+- `transportable_by_map` — maps each unit to compatible same-faction transports
 
-> The script only syncs **buildable units** — those reachable from the three faction commanders (armcom, corcom, legcom) through their build chains. Units not in any commander's build tree (like internal test units, unused variants, or raptor units with no builder) are automatically excluded.
+> The script only syncs **buildable units** — those reachable from the three faction commanders (armcom, corcom, legcom) through their build chains. Scavenger units are synced separately with `--scavengers`. Units not in either set are automatically excluded.
 
 **When to clear cache:**
 ```bash
@@ -248,7 +287,22 @@ The formula uses `dmg_vtol` when it is higher than `dmg_default`, matching the g
 
 **EMP / paralyzer weapons** (`paralyzer = true`) appear in the `weapons` field with an `EMP-` prefix (e.g. `EMP-BeamLaser`) but do **not** contribute to the DPS value — they paralyse, not damage.
 
-**Commented-out Lua values** (e.g. `--vtol = 400`) are stripped before parsing, so they are correctly ignored in damage and DPS calculations.
+**Commented-out Lua values** (e.g. `-- burst = 3`) are stripped before parsing across both scripts, so they are correctly ignored in all calculations.
+
+---
+
+## 🚢 Transport Compatibility
+
+The sync automatically computes which transports can carry which units based on BAR's engine rules:
+
+- **Ships and submarines** (movementclass contains `BOAT`, `SHIP`, `UBOAT`, or `SUB`) → **never transportable**
+- **Aircraft** (`canfly = true`) → **never transportable** (BAR has `transportAir` disabled)
+- **Hovercraft** → **transportable** (treated as ground units)
+- **Structures** → **not transportable** by default (unless `cantbetransported = false`)
+- **Mobile ground units** → **transportable** by default
+
+Only same-faction transports are matched (arm↔arm, cor↔cor, leg↔leg). The result is stored in the `transportable-by` multi-reference field.
+
 ---
 
 ## 🎨 Image Sync (Icons + Buildpics)
@@ -282,8 +336,6 @@ The sync automatically **skips re-uploading** files that already exist with the 
 - Skips commit if sizes match (no changes)
 - Only uploads when size differs or file is new
 
-This drastically reduces GitHub API calls and commit noise on subsequent syncs.
-
 ### Setup — add to `.env`:
 ```
 GITHUB_TOKEN=ghp_your_token_here
@@ -294,48 +346,20 @@ ICON_BRANCH=main
 
 > The GitHub token needs `repo` scope (full control). Create one at [github.com/settings/tokens](https://github.com/settings/tokens).
 
-**File structure in your repo:**
-```
-your-repo/
-├── icons/
-│   ├── armflea.webp
-│   ├── armzeus.webp
-│   └── ...
-├── buildpics/
-│   ├── armflea.webp
-│   ├── corkorg.webp
-│   └── ...
-└── sync_units_github_to_webflow.py
-```
-
 ---
 
-
-## 🔄 Auto-Unpublish Non-Buildable Units
+## 🔄 Auto-Archive Non-Buildable Units
 
 The sync automatically manages published status based on the commander build tree:
 
-**Step 2b: Checking published items**
-- Scans all Webflow items for units **not** in the commander tree
-- If published (not draft): automatically sets `isDraft: true`
-- If already draft or archived: skips (no change)
+- Scans all Webflow items for units **not** in the commander tree and **not** in the Scavenger set
+- If found: automatically archives the item
+- Scavenger units are always **protected** from archiving, even during regular syncs
 
-**Console output:**
-```
-Step 2b: Checking for published items not in commander build tree...
-  📝 Setting to draft: chicken_drone
-  📝 Setting to draft: testunit_alpha
-  ✅ Unpublished 15 items not in build tree
-     Examples: chicken_drone, raptor1, testunit_alpha, ...
-```
-
-**Dry-run mode:**
-```bash
-python sync_units_github_to_webflow.py --dry-run
-```
-Shows which items would be unpublished without making changes.
+> In `--scavengers` mode, the archive step is skipped entirely.
 
 ---
+
 ## 🆕 Creating New Units
 
 When the script encounters a buildable unit that doesn't exist in Webflow yet, it automatically creates it:
@@ -343,28 +367,6 @@ When the script encounters a buildable unit that doesn't exist in Webflow yet, i
 - ✅ Creates as **draft** (not published)
 - ✅ Fills in all available fields
 - ✅ Adds to `_webflow_id_map` so buildoptions work in the same run
-- ✅ Console shows "🆕 New unit — will be created as draft in Webflow"
-
-**In dry-run mode:**
-```
-  🆕 New unit — will be created as draft in Webflow
-  🔍 DRY RUN — would create as draft in Webflow
-```
-
-**Live run:**
-```
-  🆕 New unit — will be created as draft in Webflow
-  ✅ Created as draft (id: 684f20c6be5418e844c5e3cc)
-```
-
-**Summary:**
-```
-Total units processed : 15
-Created (draft)       : 3
-Updated               : 10
-Skipped (no changes)  : 2
-Errors                : 0
-```
 
 ---
 
@@ -388,14 +390,13 @@ All workflows support a `dry_run` toggle (preview without writing) and a `publis
 
 Add `WEBFLOW_API_TOKEN` to **Settings → Secrets and variables → Actions** in your repository.
 
-### Cron job (Linux / Mac)
+### Recommended sync order
 
-```bash
-crontab -e
+1. **Units first** — `python sync_units_github_to_webflow.py --publish`
+2. **Scavengers** — `python sync_units_github_to_webflow.py --scavengers --publish`
+3. **Weapons last** — `python sync_weapons_to_webflow.py --all --publish`
 
-# Add this line (runs daily at 03:00):
-0 3 * * * cd /path/to/bar-unit-sync && python3 sync_units_github_to_webflow.py --publish >> /var/log/bar-sync.log 2>&1
-```
+Weapons link back to unit items, so units must exist in Webflow first.
 
 ---
 
@@ -416,24 +417,25 @@ WEBFLOW_COLLECTION_ID = "6564c6553676389f8ba45a9e"
 COMMANDERS = {"armcom", "corcom", "legcom"}
 ```
 
-All units buildable from these commanders (factories → basic units → advanced units, etc.) are automatically included.
-
 **Faction map** — maps filename prefix to Webflow reference item ID:
 ```python
 FACTION_MAP = {
-    "arm":    {"name": "Armada", "id": "..."},
-    "cor":    {"name": "Cortex", "id": "..."},
-    "leg":    {"name": "Legion", "id": "..."},
-    "raptor": {"name": "CHICKS", "id": "..."},
+    "arm":    {"name": "Armada",  "id": "..."},
+    "cor":    {"name": "Cortex",  "id": "..."},
+    "leg":    {"name": "Legion",  "id": "..."},
+    "raptor": {"name": "CHICKS",  "id": "..."},
+    "scav":   {"name": "SCAV",    "id": "..."},
 }
 ```
+
+Scavenger units are always assigned the **SCAV** faction based on their file path (`units/Scavengers/`), regardless of their name prefix.
 
 ---
 
 ## 🐛 Troubleshooting
 
 **"Error: Webflow API token required"**
-Set `WEBFLOW_API_TOKEN` as an environment variable or pass `--token your-token`.
+Set `WEBFLOW_API_TOKEN` as an environment variable or use `--token`.
 
 **"Unit 'xyz' not found in Webflow"**
 This unit will be **automatically created as draft** in Webflow on the next run (not in `--dry-run` mode).
@@ -454,9 +456,6 @@ The buildable cache couldn't be built. Check your internet connection. Run `--cl
 
 **Rate limits**
 The script has a built-in rate limiter (110 requests/minute). If you still hit limits, reduce the request rate in the `RateLimiter` class or run the sync less frequently.
-
----
-
 
 ---
 
