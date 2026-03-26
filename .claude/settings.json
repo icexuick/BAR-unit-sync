@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(curl -s \"https://raw.githubusercontent.com/beyond-all-reason/Beyond-All-Reason/master/weapons/empblast.lua\")"
+      "Bash(curl -s \"https://raw.githubusercontent.com/beyond-all-reason/Beyond-All-Reason/master/weapons/empblast.lua\")",
+      "Read(//c/Users/icema/.claude/**)",
+      "Read(//c/Users/icema/AppData/Roaming/Code/User/**)"
     ]
   }
 }

@@ -2212,45 +2212,52 @@ class UnitSyncService:
             Public GitHub raw URL on success, None on failure
         """
         try:
-            # BAR stores buildpics in unitpics/<path>.dds
-            # Preserve subfolder (e.g. "scavengers/CORCOMBOSS.DDS" → "unitpics/scavengers/corcomboss.dds")
-            # For scavenger units, force buildpic to scavengers/ subfolder (purple variants)
-            # Strip backslashes (Windows paths), force lowercase (GitHub is case-sensitive)
-            dds_relpath = dds_filename.replace('\\', '/').lower()
-            if not dds_relpath.endswith('.dds'):
-                dds_relpath += '.dds'
-            if is_scavenger and not dds_relpath.startswith('scavengers/'):
-                dds_relpath = f"scavengers/{dds_relpath}"
-            dds_path = f"unitpics/{dds_relpath}"
-
-            dds_url = (
-                f"https://raw.githubusercontent.com/{GITHUB_REPO}"
-                f"/refs/heads/{GITHUB_BRANCH}/{dds_path}"
-            )
-
-            headers = {}
-            github_token = os.environ.get("GITHUB_TOKEN")
-            if github_token:
-                headers['Authorization'] = f'token {github_token}'
-
-            print(f"    📥 Downloading buildpic: {dds_path}")
-            response = requests.get(dds_url, headers=headers)
-            response.raise_for_status()
-            dds_data = response.content
-
-            # Convert DDS → WebP (80% quality)
-            print(f"    🔄 Converting DDS → WebP (80% quality)")
-            webp_data = ImageConverter.dds_to_webp(dds_data, quality=80)
-
-            if not webp_data:
-                print(f"    ❌ Failed to convert DDS image")
-                return None
-
             # Scavenger buildpics go in buildpics/scavengers/ subfolder
             if is_scavenger:
                 webp_filename = f"scavengers/{unit_name}.webp"
             else:
                 webp_filename = f"{unit_name}.webp"
+
+            # For scavenger units, prefer local purple-tinted WebP from buildpics/scavengers/
+            local_webp = os.path.join("buildpics", webp_filename)
+            if is_scavenger and os.path.exists(local_webp):
+                print(f"    📂 Using local buildpic: {local_webp}")
+                with open(local_webp, "rb") as f:
+                    webp_data = f.read()
+            else:
+                # BAR stores buildpics in unitpics/<path>.dds
+                # Preserve subfolder (e.g. "scavengers/CORCOMBOSS.DDS" → "unitpics/scavengers/corcomboss.dds")
+                # For scavenger units, force buildpic to scavengers/ subfolder
+                # Strip backslashes (Windows paths), force lowercase (GitHub is case-sensitive)
+                dds_relpath = dds_filename.replace('\\', '/').lower()
+                if not dds_relpath.endswith('.dds'):
+                    dds_relpath += '.dds'
+                if is_scavenger and not dds_relpath.startswith('scavengers/'):
+                    dds_relpath = f"scavengers/{dds_relpath}"
+                dds_path = f"unitpics/{dds_relpath}"
+
+                dds_url = (
+                    f"https://raw.githubusercontent.com/{GITHUB_REPO}"
+                    f"/refs/heads/{GITHUB_BRANCH}/{dds_path}"
+                )
+
+                headers = {}
+                github_token = os.environ.get("GITHUB_TOKEN")
+                if github_token:
+                    headers['Authorization'] = f'token {github_token}'
+
+                print(f"    📥 Downloading buildpic: {dds_path}")
+                response = requests.get(dds_url, headers=headers)
+                response.raise_for_status()
+                dds_data = response.content
+
+                # Convert DDS → WebP (80% quality)
+                print(f"    🔄 Converting DDS → WebP (80% quality)")
+                webp_data = ImageConverter.dds_to_webp(dds_data, quality=80)
+
+                if not webp_data:
+                    print(f"    ❌ Failed to convert DDS image")
+                    return None
 
             if dry_run:
                 print(f"    ℹ️  Would commit: buildpics/{webp_filename} ({len(webp_data):,} bytes)")
