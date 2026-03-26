@@ -1128,6 +1128,24 @@ class WebflowAPI:
             return False
 
 
+    def unarchive_item(self, item_id: str) -> bool:
+        """
+        Unarchive a CMS item so it can be updated and published again.
+        """
+        try:
+            self._rate_limit()
+            url = f"{self.base_url}/collections/{self.collection_id}/items/{item_id}"
+            payload = {"isArchived": False}
+            response = requests.patch(url, headers=self.headers, json=payload)
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            print(f"  ⚠️  Error unarchiving item {item_id}: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"     Response: {e.response.text}")
+            return False
+
+
 class IconTypesParser:
     """Parses icontypes.lua to get icon paths for units."""
     
@@ -2193,12 +2211,13 @@ class UnitSyncService:
             Public GitHub raw URL on success, None on failure
         """
         try:
-            # BAR stores buildpics in unitpics/<n>.dds
-            # Strip path prefix, force lowercase (GitHub is case-sensitive)
-            dds_basename = dds_filename.split('/')[-1].split('\\')[-1].lower()
-            if not dds_basename.endswith('.dds'):
-                dds_basename += '.dds'
-            dds_path = f"unitpics/{dds_basename}"
+            # BAR stores buildpics in unitpics/<path>.dds
+            # Preserve subfolder (e.g. "scavengers/CORCOMBOSS.DDS" → "unitpics/scavengers/corcomboss.dds")
+            # Strip backslashes (Windows paths), force lowercase (GitHub is case-sensitive)
+            dds_relpath = dds_filename.replace('\\', '/').lower()
+            if not dds_relpath.endswith('.dds'):
+                dds_relpath += '.dds'
+            dds_path = f"unitpics/{dds_relpath}"
 
             dds_url = (
                 f"https://raw.githubusercontent.com/{GITHUB_REPO}"
@@ -2968,6 +2987,16 @@ class UnitSyncService:
             else:
                 # ── UPDATE existing item ──────────────────────────────────────
                 item_id = webflow_item['id']
+
+                # Unarchive first if needed
+                if webflow_item.get('isArchived', False):
+                    print(f"  📦 Unarchiving (was archived)...")
+                    if not self.webflow.unarchive_item(item_id):
+                        print(f"  ❌ Failed to unarchive — skipping")
+                        stats['errors'] += 1
+                        print()
+                        continue
+
                 success = self.webflow.update_item(item_id, webflow_fields)
 
                 if success:
