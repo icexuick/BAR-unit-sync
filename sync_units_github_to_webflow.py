@@ -2192,7 +2192,8 @@ class UnitSyncService:
     def sync_unit_buildpic(self, unit_name: str, dds_filename: str,
                            github_uploader: GitHubIconUploader,
                            current_buildpic_url: Optional[str] = None,
-                           dry_run: bool = False) -> Optional[str]:
+                           dry_run: bool = False,
+                           is_scavenger: bool = False) -> Optional[str]:
         """
         Sync a unit's in-game buildpic.
 
@@ -2213,10 +2214,13 @@ class UnitSyncService:
         try:
             # BAR stores buildpics in unitpics/<path>.dds
             # Preserve subfolder (e.g. "scavengers/CORCOMBOSS.DDS" → "unitpics/scavengers/corcomboss.dds")
+            # For scavenger units, force buildpic to scavengers/ subfolder (purple variants)
             # Strip backslashes (Windows paths), force lowercase (GitHub is case-sensitive)
             dds_relpath = dds_filename.replace('\\', '/').lower()
             if not dds_relpath.endswith('.dds'):
                 dds_relpath += '.dds'
+            if is_scavenger and not dds_relpath.startswith('scavengers/'):
+                dds_relpath = f"scavengers/{dds_relpath}"
             dds_path = f"unitpics/{dds_relpath}"
 
             dds_url = (
@@ -2242,7 +2246,11 @@ class UnitSyncService:
                 print(f"    ❌ Failed to convert DDS image")
                 return None
 
-            webp_filename = f"{unit_name}.webp"
+            # Scavenger buildpics go in buildpics/scavengers/ subfolder
+            if is_scavenger:
+                webp_filename = f"scavengers/{unit_name}.webp"
+            else:
+                webp_filename = f"{unit_name}.webp"
 
             if dry_run:
                 print(f"    ℹ️  Would commit: buildpics/{webp_filename} ({len(webp_data):,} bytes)")
@@ -2878,10 +2886,11 @@ class UnitSyncService:
                     webflow_lookup.get(unit_name, {}).get('fieldData', {}).get('buildpic-in-game')
                     if not is_new_unit else None
                 )
+                is_scav = 'scavengers' in github_data.get('_file_path', '').lower()
                 print(f"  🖼️  Syncing buildpic ({dds_filename})...")
                 bp_url = self.sync_unit_buildpic(
                     unit_name, dds_filename, github_uploader,
-                    current_bp_url, dry_run
+                    current_bp_url, dry_run, is_scavenger=is_scav
                 )
                 if bp_url:
                     webflow_fields['buildpic-in-game'] = bp_url
