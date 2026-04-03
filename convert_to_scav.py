@@ -41,12 +41,21 @@ LEG_VAL_MIN = 0.30
 # COR units that use blue team color instead of red (ships)
 COR_BLUE_OVERRIDES = {"corslrpc", "coresuppt3"}
 
+# LEG units with bright energy glow that extends into yellow-green and cyan hues.
+# These need a wider hue range (60-175°) with flood-fill background exclusion.
+LEG_GLOW_OVERRIDES = {"legfus", "legafus", "legdeflector"}
+
+# Units to skip entirely — converted manually (e.g. in Photoshop)
+SKIP_UNITS = {"legarad"}
+
 
 def detect_faction(filename):
     """Detect faction from filename: arm* = ARM (blue), cor* = COR (red), leg* = LEG (green)."""
     base = os.path.basename(filename).lower().replace(".webp", "")
     if base in COR_BLUE_OVERRIDES:
         return "COR_BLUE"
+    elif base in LEG_GLOW_OVERRIDES:
+        return "LEG_GLOW"
     elif base.startswith("arm"):
         return "ARM"
     elif base.startswith("cor"):
@@ -55,6 +64,37 @@ def detect_faction(filename):
         return "LEG"
     else:
         return "UNKNOWN"
+
+
+def flood_fill_background(arr, tolerance=0.10):
+    """Flood-fill from corners to detect background pixels."""
+    from collections import deque
+    h, w, _ = arr.shape
+    visited = np.zeros((h, w), dtype=bool)
+    bg_mask = np.zeros((h, w), dtype=bool)
+    corners = []
+    for cy, cx in [(0, 0), (0, w-1), (h-1, 0), (h-1, w-1)]:
+        for dy in range(-2, 3):
+            for dx in range(-2, 3):
+                ny, nx = cy + dy, cx + dx
+                if 0 <= ny < h and 0 <= nx < w:
+                    corners.append((ny, nx))
+    queue = deque(corners)
+    for y, x in corners:
+        visited[y, x] = True
+        bg_mask[y, x] = True
+    while queue:
+        y, x = queue.popleft()
+        ref = arr[y, x]
+        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < h and 0 <= nx < w and not visited[ny, nx]:
+                visited[ny, nx] = True
+                diff = np.sqrt(np.sum((arr[ny, nx] - ref) ** 2))
+                if diff < tolerance:
+                    bg_mask[ny, nx] = True
+                    queue.append((ny, nx))
+    return bg_mask
 
 
 def convert_to_purple(input_path, output_path):
@@ -119,6 +159,27 @@ def convert_to_purple(input_path, output_path):
             (val >= COR_VAL_MIN)
         )
         print(f"  Faction: COR (red -> purple)")
+    elif faction == "LEG_GLOW":
+        # Energy glow units (legfus, legafus): green extends into yellow-green (H60-95)
+        # and cyan (H145-175). Use flood-fill to exclude grass background.
+        bg_mask = flood_fill_background(arr, tolerance=0.10)
+        print(f"  Background: {100*np.sum(bg_mask)/(h*w):.1f}% (flood-fill)")
+
+        # Standard LEG green range
+        standard = (
+            ((hue_norm >= LEG_HUE_MIN) & (hue_norm <= LEG_HUE_MAX) & (sat >= LEG_SAT_MIN) & (val >= LEG_VAL_MIN)) |
+            ((hue_norm >= LEG_HUE_MIN) & (hue_norm <= LEG_HUE_MAX) & (sat >= 0.25) & (sat < LEG_SAT_MIN) & (val >= 0.60))
+        ) & ~bg_mask
+
+        # Extended: yellow-green glow (H60-95) and cyan glow (H145-175)
+        wide_glow = (
+            (hue_norm >= 60/360.0) & (hue_norm <= 175/360.0) &
+            (sat >= 0.50) & (val >= 0.50) & ((sat * val) >= 0.35) &
+            ~bg_mask
+        )
+
+        team_mask = standard | wide_glow
+        print(f"  Faction: LEG_GLOW (green+cyan -> purple, bg-excluded)")
     elif faction == "LEG":
         # Green team color: saturated green + light/pastel green accents
         # Two tiers: normal green (sat>=0.45) and light green stripes (sat>=0.25, val>=0.60)
@@ -236,6 +297,10 @@ def main():
     print(f"Converting {len(files)} buildpics to scavenger purple...\n")
 
     for fname in files:
+        base = fname.lower().replace(".webp", "")
+        if base in SKIP_UNITS:
+            print(f"[{fname}] SKIPPED (manual conversion)")
+            continue
         print(f"[{fname}]")
         input_path = os.path.join(input_dir, fname)
         output_path = os.path.join(output_dir, fname)

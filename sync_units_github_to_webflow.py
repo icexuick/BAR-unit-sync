@@ -370,7 +370,7 @@ class LuaParser:
         return None
 
     @staticmethod
-    def parse_weapons(unit_block: str, unit_paths_map: dict = None) -> Dict:
+    def parse_weapons(unit_block: str, unit_paths_map: dict = None, unit_name: str = "") -> Dict:
         """
         Parse weapondefs + weapons blocks from a unit block to compute:
           - dps          : int  (0 if no weapons or only EMP/paralyzer)
@@ -698,9 +698,16 @@ class LuaParser:
             if wd.get('sweepfire', 1) > 1:
                 dmg = dmg * wd['sweepfire']
 
-            # Calculate main projectile DPS (WITHOUT cluster/napalm)
-            reload = wd['reloadtime'] or 1.0
-            main_dps = (dmg * (1.0 / reload)) * wd['salvosize'] * wd['burst'] * wd['projectiles']
+            # Kamikaze weapons: DPS = full alpha damage (unit dies on firing)
+            from sync_weapons_to_webflow import KAMIKAZE_WEAPONS  # noqa: E402
+            is_kamikaze = (unit_name in KAMIKAZE_WEAPONS and
+                           def_key.lower() == KAMIKAZE_WEAPONS[unit_name])
+            if is_kamikaze:
+                main_dps = dmg
+            else:
+                # Calculate main projectile DPS (WITHOUT cluster/napalm)
+                reload = wd['reloadtime'] or 1.0
+                main_dps = (dmg * (1.0 / reload)) * wd['salvosize'] * wd['burst'] * wd['projectiles']
             
             # Add napalm DOT if present
             if wd.get('area_onhit_damage') and wd.get('area_onhit_time'):
@@ -858,7 +865,7 @@ class LuaParser:
                     unit_data['_has_buildoptions'] = True
 
             # Parse weapons: DPS, range, weapon type list, stockpile limit, impulse, aoe, targets
-            weapon_result = LuaParser.parse_weapons(unit_block, unit_paths_map=unit_paths_map)
+            weapon_result = LuaParser.parse_weapons(unit_block, unit_paths_map=unit_paths_map, unit_name=unit_name)
             unit_data['_has_weapondefs'] = weapon_result['has_weapondefs']
             unit_data['_has_damage']     = weapon_result['has_damage']
             if weapon_result['has_weapondefs']:

@@ -14,6 +14,7 @@ License: BAR Only - See LICENSE file
 import os
 import re
 import json
+import time
 import requests
 import argparse
 from typing import Dict, List, Optional, Any, Tuple
@@ -38,6 +39,28 @@ WEAPON_CATEGORIES_COLLECTION_ID = "6998dad0bb861bb8fa17d237"
 # Weapon category mapping (weapontype → category rules)
 # We'll fetch actual IDs from Webflow at runtime
 WEAPON_CATEGORY_MAP = {}  # Populated during init
+
+# Kamikaze units: unit_name → weapondef_key
+# These are suicide units whose weapon is a one-time explosion (trigger-explosive).
+# DPS is set to full alpha damage instead of damage/reload.
+KAMIKAZE_WEAPONS = {
+    "legkam": "martyrbomb",
+}
+
+# Category overrides: (unit_name, weapondef_key) → category_slug
+# For weapons that use a different weapontype in-game for special mechanics
+CATEGORY_OVERRIDES = {
+    ("armmship", "rocket"): "vertical-rocket-launcher",
+    ("cormship", "rocket"): "vertical-rocket-launcher",
+    ("leganavymissileship", "leg_salvo_vertical_rocket"): "vertical-rocket-launcher",
+}
+
+# Weapontype overrides: (unit_name, weapondef_key) → weapontype string for Webflow
+WEAPONTYPE_OVERRIDES = {
+    ("armmship", "rocket"): "StarburstLauncher",
+    ("cormship", "rocket"): "StarburstLauncher",
+    ("leganavymissileship", "leg_salvo_vertical_rocket"): "StarburstLauncher",
+}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -72,29 +95,36 @@ class LuaParser:
 
 
 class RateLimiter:
-    """Simple rate limiter to stay under Webflow API limits."""
-    
-    def __init__(self, max_requests_per_minute: int = 60):
+    """Rate limiter with per-request delay to avoid Webflow 429 burst detection."""
+
+    def __init__(self, max_requests_per_minute: int = 50, min_delay: float = 1.5):
         self.max_requests = max_requests_per_minute
+        self.min_delay = min_delay  # minimum seconds between any two requests
         self.requests = []
-    
+        self.last_request = 0
+
     def wait_if_needed(self):
-        """Wait if we're approaching rate limit."""
-        import time
+        """Wait to respect both burst delay and per-minute cap."""
         now = time.time()
-        
-        # Remove requests older than 60 seconds
+
+        # Always wait at least min_delay since last request (anti-burst)
+        since_last = now - self.last_request
+        if since_last < self.min_delay:
+            time.sleep(self.min_delay - since_last)
+
+        # Per-minute cap
+        now = time.time()
         self.requests = [ts for ts in self.requests if now - ts < 60]
-        
+
         if len(self.requests) >= self.max_requests:
-            # Wait until oldest request expires
-            sleep_time = 60 - (now - self.requests[0]) + 0.1
+            sleep_time = 60 - (now - self.requests[0]) + 1.0
             if sleep_time > 0:
-                print(f"  ⏱️  Rate limit - waiting {sleep_time:.1f}s...")
+                print(f"  ⏱️  Rate limit cap — waiting {sleep_time:.1f}s...")
                 time.sleep(sleep_time)
                 self.requests = []
-        
-        self.requests.append(now)
+
+        self.last_request = time.time()
+        self.requests.append(self.last_request)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -120,7 +150,20 @@ class WebflowAPI:
         """Apply rate limiting before API calls."""
         if self.rate_limiter:
             self.rate_limiter.wait_if_needed()
-    
+
+    def _request_with_retry(self, method, url, max_retries=3, **kwargs):
+        """Make an API request with automatic retry on 429 Too Many Requests."""
+        for attempt in range(max_retries):
+            self._rate_limit()
+            response = method(url, headers=self.headers, **kwargs)
+            if response.status_code == 429:
+                wait = 15 * (attempt + 1)
+                print(f"  ⏱️  429 Too Many Requests — waiting {wait}s (attempt {attempt+1}/{max_retries})...")
+                time.sleep(wait)
+                continue
+            return response
+        return response  # return last response even if still 429
+
     def get_all_items(self) -> List[Dict]:
         """Fetch all items from the collection."""
         items = []
@@ -129,12 +172,10 @@ class WebflowAPI:
         
         while True:
             try:
-                self._rate_limit()
-                
                 url = f"{self.base_url}/collections/{self.collection_id}/items"
                 params = {"offset": offset, "limit": limit}
-                
-                response = requests.get(url, headers=self.headers, params=params)
+
+                response = self._request_with_retry(requests.get, url, params=params)
                 response.raise_for_status()
                 data = response.json()
                 
@@ -155,16 +196,14 @@ class WebflowAPI:
     def create_item(self, field_data: Dict, is_draft: bool = True) -> Optional[str]:
         """Create a new item. Returns the item ID on success."""
         try:
-            self._rate_limit()
-            
             url = f"{self.base_url}/collections/{self.collection_id}/items"
-            
+
             payload = {
                 "fieldData": field_data,
                 "isDraft": is_draft
             }
-            
-            response = requests.post(url, headers=self.headers, json=payload)
+
+            response = self._request_with_retry(requests.post, url, json=payload)
             response.raise_for_status()
             
             data = response.json()
@@ -179,15 +218,13 @@ class WebflowAPI:
     def update_item(self, item_id: str, field_data: Dict) -> bool:
         """Update an existing item."""
         try:
-            self._rate_limit()
-            
             url = f"{self.base_url}/collections/{self.collection_id}/items/{item_id}"
-            
+
             payload = {
                 "fieldData": field_data
             }
-            
-            response = requests.patch(url, headers=self.headers, json=payload)
+
+            response = self._request_with_retry(requests.patch, url, json=payload)
             response.raise_for_status()
             
             return True
@@ -201,15 +238,13 @@ class WebflowAPI:
     def publish_item(self, item_id: str) -> bool:
         """Publish a single item."""
         try:
-            self._rate_limit()
-            
             url = f"{self.base_url}/collections/{self.collection_id}/items/publish"
-            
+
             payload = {
                 "itemIds": [item_id]
             }
-            
-            response = requests.post(url, headers=self.headers, json=payload)
+
+            response = self._request_with_retry(requests.post, url, json=payload)
             response.raise_for_status()
             
             # Check response for errors
@@ -222,6 +257,90 @@ class WebflowAPI:
             
         except Exception as e:
             print(f"  ❌ Error publishing item {item_id}: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"     Response: {e.response.text}")
+            return False
+
+    # ── Bulk operations (max 100 items per request) ──────────────────────────
+
+    def bulk_create_items(self, items_field_data: List[Dict], is_draft: bool = False) -> List[str]:
+        """
+        Create multiple items in one API call.
+        items_field_data: list of fieldData dicts (max 100).
+        Returns list of created item IDs.
+        """
+        if not items_field_data:
+            return []
+        try:
+            url = f"{self.base_url}/collections/{self.collection_id}/items"
+            # Webflow v2 bulk create expects { items: [{fieldData, isDraft}, ...] }
+            payload = {
+                "items": [
+                    {"fieldData": fd, "isDraft": is_draft}
+                    for fd in items_field_data
+                ]
+            }
+            response = self._request_with_retry(requests.post, url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            # Response: {items: [{id, fieldData, ...}, ...]}
+            if isinstance(data, dict):
+                items = data.get('items', [])
+                if items:
+                    return [item.get('id') for item in items if item.get('id')]
+                if data.get('id'):
+                    return [data['id']]
+            elif isinstance(data, list):
+                return [item.get('id') for item in data if item.get('id')]
+            return []
+        except Exception as e:
+            print(f"  ❌ Bulk create error: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"     Response: {e.response.text}")
+            return []
+
+    def bulk_update_items(self, items: List[Dict]) -> int:
+        """
+        Update multiple items in one API call.
+        items: list of {id, fieldData} dicts (max 100).
+        Returns number of successfully updated items.
+        """
+        if not items:
+            return 0
+        try:
+            url = f"{self.base_url}/collections/{self.collection_id}/items"
+            payload = {"items": items}
+            response = self._request_with_retry(requests.patch, url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, dict):
+                return len(data.get('items', items))
+            return len(items)
+        except Exception as e:
+            print(f"  ❌ Bulk update error: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"     Response: {e.response.text}")
+            return 0
+
+    def bulk_publish_items(self, item_ids: List[str]) -> bool:
+        """
+        Publish multiple items in one API call.
+        item_ids: list of item IDs (max 100).
+        """
+        if not item_ids:
+            return True
+        try:
+            url = f"{self.base_url}/collections/{self.collection_id}/items/publish"
+            payload = {"itemIds": item_ids}
+            response = self._request_with_retry(requests.post, url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            if data.get('errors'):
+                print(f"  ⚠️  Bulk publish had errors: {data['errors']}")
+                return False
+            return True
+        except Exception as e:
+            print(f"  ❌ Bulk publish error: {e}")
             if hasattr(e, 'response') and e.response is not None:
                 print(f"     Response: {e.response.text}")
             return False
@@ -565,7 +684,7 @@ class WeaponParser:
                 # Weapon stats
                 'reload_time': round(_val(wblock, 'reloadtime', float) or 0, 5),
                 'range': int(_val(wblock, 'range', float) or 0),
-                'accuracy': int(_val(wblock, 'accuracy', float) or 0),
+                'accuracy': int(_val(wblock, 'accuracy', float) or _val(wblock, 'movingaccuracy', float) or 0),
                 'area_of_effect': int(_val(wblock, 'areaofeffect', float) or 0),
                 'edge_effectiveness': round(_val(wblock, 'edgeeffectiveness', float) or 1.0, 2),
                 'impulse': round(_val(wblock, 'impulsefactor', float) or 0, 2),
@@ -574,6 +693,7 @@ class WeaponParser:
                 'projectiles': int(_val(wblock, 'projectiles', float) or 1),
                 'velocity': int(_val(wblock, 'weaponvelocity', float) or 0),
                 'burst': int(_val(wblock, 'burst', float) or 1),
+                'burst_rate': round(_val(wblock, 'burstrate', float) or 0, 5),
                 
                 # Cost stats
                 'energy_per_shot': int(_val(wblock, 'energypershot', float) or 0),
@@ -607,6 +727,13 @@ class WeaponParser:
                 
                 # For DPS calculation
                 '_salvosize': int(_val(wblock, 'salvosize', float) or 1),
+
+                # Sound (fallback: soundhitdry if no soundstart)
+                'sound_start': _val(wblock, 'soundstart') or _val(wblock, 'soundhitdry') or None,
+
+                # Velocity
+                'start_velocity': int(_val(wblock, 'startvelocity', float) or 0),
+                'weapon_acceleration': int(_val(wblock, 'weaponacceleration', float) or 0),
             }
             
             # Parse shield = { } sub-block if weapontype is Shield
@@ -632,8 +759,22 @@ class WeaponParser:
                         if radius_match:
                             weapon_data['shield_radius'] = int(float(radius_match.group(1)))
             
+            # Apply weapontype override if configured
+            override_key = (unit_name, weapondef_key)
+            if override_key in WEAPONTYPE_OVERRIDES:
+                weapon_data['weapon_type'] = WEAPONTYPE_OVERRIDES[override_key]
+
             weapondefs_dict[weapondef_key.upper()] = weapon_data
-        
+
+        # Sound fallback: if a weapon has no sound, borrow from a sibling weapondef
+        # (e.g. legphoenix skybeam has no sound, but legphsound has soundhitdry)
+        all_sounds = [wd['sound_start'] for wd in weapondefs_dict.values() if wd.get('sound_start')]
+        if all_sounds:
+            fallback_sound = all_sounds[0]
+            for wd in weapondefs_dict.values():
+                if not wd.get('sound_start'):
+                    wd['sound_start'] = fallback_sound
+
         # Now parse weapons = {} to find which weapondefs are actually used and count them
         # Also read onlytargetcategory per weapon entry
         weapon_counts = {}
@@ -770,8 +911,16 @@ class WeaponParser:
                     dot_dps += lightning_dot
                     weapon['_has_lightning_chain'] = True
                 
+                # Kamikaze weapons: DPS = full alpha damage (unit dies on firing)
+                wep_unit = weapon['name'].split('-')[0] if '-' in weapon['name'] else ''
+                is_kamikaze = (wep_unit in KAMIKAZE_WEAPONS and
+                               weapon['weapondef_key'] == KAMIKAZE_WEAPONS[wep_unit])
+                if is_kamikaze and dmg > 0:
+                    weapon['dps'] = dmg
+                    weapon['dot'] = 0
+                    weapon['pps'] = 0
                 # Calculate main projectile DPS (without DOT)
-                if dmg > 0 and weapon['reload_time'] > 0:
+                elif dmg > 0 and weapon['reload_time'] > 0:
                     main_dps = (dmg * (1.0 / weapon['reload_time'])) * weapon['_salvosize'] * weapon['burst'] * weapon['projectiles']
                     weapon['dps'] = int(round(main_dps))
                     weapon['dot'] = int(round(dot_dps)) if dot_dps > 0 else 0
@@ -948,6 +1097,7 @@ class WeaponParser:
             'projectiles':      int(_val(wblock, 'projectiles', float) or 1),
             'velocity':         int(_val(wblock, 'weaponvelocity', float) or 0),
             'burst':            int(_val(wblock, 'burst', float) or 1),
+            'burst_rate':       round(_val(wblock, 'burstrate', float) or 0, 5),
 
             # Cost
             'energy_per_shot':  int(_val(wblock, 'energypershot', float) or 0),
@@ -984,6 +1134,13 @@ class WeaponParser:
             # Mine weapon has count 1
             'weapon_count':     1,
             '_is_mine':         True,   # Mark as mine explosion weapon
+
+            # Sound
+            'sound_start':      _val(wblock, 'soundstart') or None,
+
+            # Velocity
+            'start_velocity':   int(_val(wblock, 'startvelocity', float) or 0),
+            'weapon_acceleration': int(_val(wblock, 'weaponacceleration', float) or 0),
         }
 
         # Resolve onlytargetcategory — mine weapons don't have a weapons = {} block,
@@ -1039,7 +1196,14 @@ class WeaponCategoryDetector:
         weapondef_key = weapon.get('weapondef_key', '').lower()
         full_name = weapon.get('full_name', '').lower()
         
-        # Drone Carrier (CHECK FIRST - absolute priority)
+        # Explicit category overrides (CHECK FIRST - absolute priority)
+        weapon_name = weapon.get('name', '')  # e.g. "armmship-plasmacannon"
+        unit_name = weapon_name.split('-')[0] if '-' in weapon_name else ''
+        override_key = (unit_name, weapondef_key)
+        if override_key in CATEGORY_OVERRIDES:
+            return self.category_map.get(CATEGORY_OVERRIDES[override_key])
+
+        # Drone Carrier
         if weapon.get('_drone_carried_unit'):
             return self.category_map.get('drone-controller')
 
@@ -1263,11 +1427,15 @@ class WeaponCategoryDetector:
         if wtype == 'Melee':
             return self.category_map.get('melee')
         
+        # Kamikaze units (explicit list) — categorized as trigger-explosive
+        if unit_name in KAMIKAZE_WEAPONS and weapondef_key == KAMIKAZE_WEAPONS[unit_name]:
+            return self.category_map.get('trigger-explosive')
+
         # Aircraft EMP Bomb (CHECK FIRST - more specific than regular AircraftBomb)
         # Criteria: AircraftBomb + paralyzer = true
         if wtype == 'AircraftBomb' and weapon.get('paralyzer', False):
             return self.category_map.get('aircraft-emp-bomb')
-        
+
         # AircraftBomb
         if wtype == 'AircraftBomb':
             return self.category_map.get('aircraft-bomb')
@@ -1290,18 +1458,199 @@ class WeaponCategoryDetector:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SOUND HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+import base64
+import subprocess
+import tempfile
+
+# Cached index: soundname (lowercase, no ext) → raw GitHub URL
+_sounds_index_cache: Optional[Dict[str, str]] = None
+
+SOUNDS_REPO_DIR = "weapon-sounds"  # Folder in unit-sync repo for MP3s
+
+
+def _build_sounds_index(gh_headers: dict) -> Dict[str, str]:
+    """Build a one-time index mapping sound name (lowercase, no ext) → raw GitHub URL."""
+    global _sounds_index_cache
+    if _sounds_index_cache is not None:
+        return _sounds_index_cache
+
+    print("  🔍 Building sounds index from BAR repo (one-time)...")
+    tree_url = (
+        f"https://api.github.com/repos/{GITHUB_REPO}"
+        f"/git/trees/{GITHUB_BRANCH}?recursive=1"
+    )
+    try:
+        resp = requests.get(tree_url, headers=gh_headers, timeout=20)
+        resp.raise_for_status()
+        tree = resp.json()
+    except Exception as e:
+        print(f"  ❌ Could not fetch GitHub tree for sounds: {e}")
+        _sounds_index_cache = {}
+        return {}
+
+    index = {}
+    for item in tree.get("tree", []):
+        path = item.get("path", "")
+        if path.startswith("sounds/") and path.lower().endswith(".wav"):
+            name = os.path.splitext(os.path.basename(path))[0].lower()
+            raw_url = (
+                f"https://raw.githubusercontent.com/{GITHUB_REPO}"
+                f"/refs/heads/{GITHUB_BRANCH}/{path}"
+            )
+            index[name] = raw_url
+
+    print(f"     ✅ Sound index built: {len(index)} WAV files")
+    _sounds_index_cache = index
+    return index
+
+
+def resolve_and_upload_sound(
+    sound_name: str,
+    gh_headers: dict,
+    sync_gh_owner: str,
+    sync_gh_repo: str,
+    sync_gh_branch: str,
+    sync_gh_token: str,
+) -> Optional[str]:
+    """
+    Given a soundstart name (e.g. "lasrfir1"), find the WAV in the BAR repo,
+    convert to mono 128kbps MP3, upload to our unit-sync GitHub repo,
+    and return a jsDelivr CDN URL (works as external URL in Webflow File fields).
+    Returns None if the sound can't be found or converted.
+    """
+    if not sound_name:
+        return None
+
+    index = _build_sounds_index(gh_headers)
+    wav_url = index.get(sound_name.lower())
+    if not wav_url:
+        print(f"     ⚠️  Sound not found in BAR repo: {sound_name}")
+        return None
+
+    # Download WAV
+    try:
+        r = requests.get(wav_url, headers=gh_headers, timeout=20)
+        r.raise_for_status()
+        wav_bytes = r.content
+    except Exception as e:
+        print(f"     ❌ Could not download WAV {sound_name}: {e}")
+        return None
+
+    # Convert WAV → mono 128kbps MP3 using ffmpeg
+    mp3_filename = f"{sound_name.lower()}.mp3"
+    tmp_wav_path = tmp_mp3_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
+            tmp_wav.write(wav_bytes)
+            tmp_wav_path = tmp_wav.name
+
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_mp3:
+            tmp_mp3_path = tmp_mp3.name
+
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", tmp_wav_path, "-ac", "1", "-ab", "128k", "-f", "mp3", tmp_mp3_path],
+            capture_output=True,
+            check=True,
+        )
+        with open(tmp_mp3_path, "rb") as f:
+            mp3_bytes = f.read()
+    except subprocess.CalledProcessError as e:
+        print(f"     ❌ ffmpeg failed for {sound_name}: {e.stderr.decode()[:200]}")
+        return None
+    except Exception as e:
+        print(f"     ❌ Sound conversion error for {sound_name}: {e}")
+        return None
+    finally:
+        for p in (tmp_wav_path, tmp_mp3_path):
+            if p:
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
+
+    # Upload MP3 to unit-sync GitHub repo
+    repo_path = f"weapon-sounds/{mp3_filename}"
+    api_url = (
+        f"https://api.github.com/repos/{sync_gh_owner}/{sync_gh_repo}"
+        f"/contents/{repo_path}"
+    )
+    upload_headers = {
+        "Authorization": f"token {sync_gh_token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+    sha = None
+    existing = requests.get(api_url, headers=upload_headers, params={"ref": sync_gh_branch})
+    if existing.status_code == 200:
+        existing_data = existing.json()
+        sha = existing_data.get("sha")
+        if existing_data.get("size") == len(mp3_bytes):
+            jsdelivr_url = (
+                f"https://cdn.jsdelivr.net/gh/{sync_gh_owner}/{sync_gh_repo}"
+                f"@{sync_gh_branch}/{repo_path}"
+            )
+            print(f"     Sound already up-to-date: {mp3_filename}")
+            return jsdelivr_url
+
+    payload = {
+        "message": f"Add/update weapon sound: {mp3_filename}",
+        "content": base64.b64encode(mp3_bytes).decode(),
+        "branch": sync_gh_branch,
+    }
+    if sha:
+        payload["sha"] = sha
+
+    try:
+        resp = requests.put(api_url, headers=upload_headers, json=payload)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"     ❌ GitHub upload failed for {mp3_filename}: {e}")
+        return None
+
+    jsdelivr_url = (
+        f"https://cdn.jsdelivr.net/gh/{sync_gh_owner}/{sync_gh_repo}"
+        f"@{sync_gh_branch}/{repo_path}"
+    )
+    print(f"     🔊 Sound uploaded: {mp3_filename} ({len(mp3_bytes):,} bytes)")
+    return jsdelivr_url
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # WEAPON SYNC SERVICE
 # ══════════════════════════════════════════════════════════════════════════════
 
 class WeaponSyncService:
     """Main service to sync weapons from GitHub to Webflow."""
-    
-    def __init__(self, webflow_weapons: WebflowAPI, webflow_categories: WebflowAPI, 
+
+    def __init__(self, webflow_weapons: WebflowAPI, webflow_categories: WebflowAPI,
                  webflow_units: WebflowAPI):
         self.weapons_api = webflow_weapons
         self.categories_api = webflow_categories
         self.units_api = webflow_units
         self.category_detector = None  # Initialized after loading categories
+
+        # Cache: sound_name → Webflow hosted URL (avoid re-uploading same sound in one run)
+        self._sound_url_cache: Dict[str, Optional[str]] = {}
+
+        # Caches (populated by prefetch_caches, avoids re-fetching per unit)
+        self._existing_weapons_cache = None   # {weapon_name: item_dict}
+        self._units_by_name_cache = None      # {unit_name_lower: webflow_id}
+        self._all_webflow_units_cache = None  # [unit_dicts]
+
+        # Bulk operation queues
+        self._pending_creates = []      # [{fieldData}]
+        self._pending_updates = []      # [{id, fieldData}]
+        self._pending_publish_ids = []  # [item_id]
+        # Track unit link updates to flush in bulk
+        self._pending_unit_updates = []  # [{id, fieldData}]
+        self._pending_unit_publish_ids = []  # [unit_id]
+        # Map weapon name→id for weapons that already existed or will be created
+        self._weapon_name_to_id = {}
+        # Track create order so we can assign IDs from bulk create response
+        self._create_names_order = []   # [weapon_name] in same order as _pending_creates
     
     def load_weapon_categories(self):
         """Load weapon categories from Webflow to build category map."""
@@ -1320,7 +1669,144 @@ class WeaponSyncService:
         
         self.category_detector = WeaponCategoryDetector(category_map)
         return category_map
-    
+
+    def prefetch_caches(self):
+        """Pre-fetch existing weapons and units from Webflow (call once before bulk sync)."""
+        print("📦 Pre-fetching existing weapons from Webflow...")
+        existing_weapons = self.weapons_api.get_all_items()
+        self._existing_weapons_cache = {
+            item.get('fieldData', {}).get('name', ''): item
+            for item in existing_weapons
+        }
+        print(f"  ✅ Cached {len(self._existing_weapons_cache)} existing weapons")
+
+        print("📦 Pre-fetching all units from Webflow...")
+        self._all_webflow_units_cache = self.units_api.get_all_items()
+        self._units_by_name_cache = {
+            u.get('fieldData', {}).get('name', '').lower(): u['id']
+            for u in self._all_webflow_units_cache if u.get('id')
+        }
+        print(f"  ✅ Cached {len(self._units_by_name_cache)} units")
+        print()
+
+    def _get_existing_weapons_lookup(self) -> Dict[str, Dict]:
+        """Return cached existing weapons lookup, or fetch if not cached."""
+        if self._existing_weapons_cache is not None:
+            return self._existing_weapons_cache
+        existing_weapons = self.weapons_api.get_all_items()
+        return {
+            item.get('fieldData', {}).get('name', ''): item
+            for item in existing_weapons
+        }
+
+    def _get_units_by_name(self) -> Dict[str, str]:
+        """Return cached units-by-name lookup, or fetch if not cached."""
+        if self._units_by_name_cache is not None:
+            return self._units_by_name_cache
+        all_units = self.units_api.get_all_items()
+        return {
+            u.get('fieldData', {}).get('name', '').lower(): u['id']
+            for u in all_units if u.get('id')
+        }
+
+    def flush_bulk_operations(self, publish: bool = False) -> Tuple[int, int, int]:
+        """
+        Send all pending bulk operations to Webflow.
+        Returns (created_count, updated_count, published_count).
+        """
+        created = 0
+        updated = 0
+        published = 0
+
+        # ── Bulk create weapons (batches of 100) ─────────────────────────
+        if self._pending_creates:
+            print(f"\n📤 Bulk creating {len(self._pending_creates)} weapons...")
+            for i in range(0, len(self._pending_creates), 100):
+                batch = self._pending_creates[i:i+100]
+                batch_names = self._create_names_order[i:i+100]
+                ids = self.weapons_api.bulk_create_items(batch, is_draft=(not publish))
+                if ids:
+                    created += len(ids)
+                    # Map names to new IDs
+                    for name, wid in zip(batch_names, ids):
+                        self._weapon_name_to_id[name] = wid
+                    self._pending_publish_ids.extend(ids)
+                    print(f"  ✅ Created batch {i//100 + 1}: {len(ids)} weapons")
+                else:
+                    print(f"  ❌ Batch {i//100 + 1} failed")
+
+        # ── Bulk update weapons (batches of 100) ─────────────────────────
+        if self._pending_updates:
+            print(f"\n📤 Bulk updating {len(self._pending_updates)} weapons...")
+            for i in range(0, len(self._pending_updates), 100):
+                batch = self._pending_updates[i:i+100]
+                count = self.weapons_api.bulk_update_items(batch)
+                updated += count
+                # Collect IDs for publish
+                self._pending_publish_ids.extend(item['id'] for item in batch)
+                print(f"  ✅ Updated batch {i//100 + 1}: {count} weapons")
+
+        # ── Bulk publish weapons ─────────────────────────────────────────
+        if publish and self._pending_publish_ids:
+            unique_ids = list(dict.fromkeys(self._pending_publish_ids))  # deduplicate, keep order
+            print(f"\n📢 Bulk publishing {len(unique_ids)} weapons...")
+            for i in range(0, len(unique_ids), 100):
+                batch = unique_ids[i:i+100]
+                ok = self.weapons_api.bulk_publish_items(batch)
+                if ok:
+                    published += len(batch)
+                    print(f"  ✅ Published batch {i//100 + 1}: {len(batch)} weapons")
+                else:
+                    print(f"  ⚠️  Publish batch {i//100 + 1} had issues")
+
+        # ── Resolve pending-create-xxx IDs in unit updates ────────────────
+        if self._pending_unit_updates:
+            for unit_update in self._pending_unit_updates:
+                weapons_ref = unit_update['fieldData'].get('attached-unit-weapons', [])
+                resolved = []
+                for wid in weapons_ref:
+                    if isinstance(wid, str) and wid.startswith("pending-create-"):
+                        wname = wid.replace("pending-create-", "")
+                        actual_id = self._weapon_name_to_id.get(wname)
+                        if actual_id:
+                            resolved.append(actual_id)
+                        # else: weapon create failed, skip
+                    else:
+                        resolved.append(wid)
+                unit_update['fieldData']['attached-unit-weapons'] = resolved
+
+        # ── Bulk update units (link weapons + target caps) ───────────────
+        if self._pending_unit_updates:
+            print(f"\n📤 Bulk updating {len(self._pending_unit_updates)} units (weapon links)...")
+            for i in range(0, len(self._pending_unit_updates), 100):
+                batch = self._pending_unit_updates[i:i+100]
+                count = self.units_api.bulk_update_items(batch)
+                print(f"  ✅ Updated batch {i//100 + 1}: {count} units")
+
+        # ── Bulk publish units ───────────────────────────────────────────
+        if publish and self._pending_unit_publish_ids:
+            unique_ids = list(dict.fromkeys(self._pending_unit_publish_ids))
+            print(f"\n📢 Bulk publishing {len(unique_ids)} units...")
+            for i in range(0, len(unique_ids), 100):
+                batch = unique_ids[i:i+100]
+                ok = self.units_api.bulk_publish_items(batch)
+                if ok:
+                    print(f"  ✅ Published batch {i//100 + 1}: {len(batch)} units")
+                else:
+                    print(f"  ⚠️  Publish batch {i//100 + 1} had issues")
+
+        # Clear queues
+        total_creates = len(self._pending_creates)
+        total_updates = len(self._pending_updates)
+        self._pending_creates.clear()
+        self._pending_updates.clear()
+        self._pending_publish_ids.clear()
+        self._create_names_order.clear()
+        self._pending_unit_updates.clear()
+        self._pending_unit_publish_ids.clear()
+
+        return created, updated, published
+
     def fetch_unit_file(self, unit_name: str) -> Optional[str]:
         """Fetch a single unit .lua file from GitHub by searching recursively."""
         try:
@@ -1477,11 +1963,15 @@ class WeaponSyncService:
 
         return None
 
-    def sync_weapons_for_unit(self, unit_name: str, dry_run: bool = False, publish: bool = False) -> Tuple[List[str], List[Dict]]:
+    def sync_weapons_for_unit(self, unit_name: str, dry_run: bool = False, publish: bool = False, bulk: bool = False) -> Tuple[List[str], List[Dict]]:
         """
         Sync all weapons for a single unit.
         For mine units (mine = true in customparams), fetches the explosion
         weapon from weapons/explodeas.lua instead of the unit's weapondefs.
+
+        When bulk=True, operations are queued instead of executed immediately.
+        Call flush_bulk_operations() to send them all at once.
+
         Returns tuple of (weapon_ids, weapons_data).
         """
         print(f"\nProcessing unit: {unit_name}")
@@ -1493,6 +1983,21 @@ class WeaponSyncService:
         
         # Strip Lua comments before parsing
         unit_content_clean = re.sub(r'--[^\n]*', '', unit_content)
+
+        # ── Parse selfdestructcountdown ───────────────────────────────────────
+        sdc_match = re.search(r'\bselfdestructcountdown\s*=\s*(\d+)', unit_content_clean, re.IGNORECASE)
+        sdc_value = int(sdc_match.group(1)) if sdc_match else None  # None = not specified (default 5)
+
+        # ── Parse selfdestructas / explodeas ──────────────────────────────────
+        sda_match = re.search(r'\bselfdestructas\s*=\s*["\']+([\w]+)["\']+', unit_content_clean, re.IGNORECASE)
+        if not sda_match:
+            sda_match = re.search(r'\bselfdestructas\s*=\s*(\w+)', unit_content_clean, re.IGNORECASE)
+        ea_match = re.search(r'\bexplodeas\s*=\s*["\']+([\w]+)["\']+', unit_content_clean, re.IGNORECASE)
+        if not ea_match:
+            ea_match = re.search(r'\bexplodeas\s*=\s*(\w+)', unit_content_clean, re.IGNORECASE)
+
+        selfdestructas = sda_match.group(1) if sda_match else None
+        explodeas_name = ea_match.group(1) if ea_match else None
 
         # ── Detect if this is a mine, crawling bomb, or spy unit ─────────────
         # All types use an external selfdestructas/explodeas weapon — unitdef weapons are ignored.
@@ -1518,7 +2023,7 @@ class WeaponSyncService:
 
         # Crawling bomb check
         if not is_explode_unit:
-            has_sdc0    = bool(re.search(r'\bselfdestructcountdown\s*=\s*0\b', unit_content_clean, re.IGNORECASE))
+            has_sdc0    = bool(sdc_value == 0)
             has_explo   = bool(cp_block and re.search(r'\bunitgroup\s*=\s*["\']+explo["\']+', cp_block, re.IGNORECASE))
             has_instant = bool(cp_block and re.search(r'\binstantselfd\s*=\s*true', cp_block, re.IGNORECASE))
             if has_sdc0 and has_explo and has_instant:
@@ -1527,7 +2032,7 @@ class WeaponSyncService:
 
         # Spy bomb check (paralyze self-destruct)
         if not is_explode_unit:
-            has_sdc0      = bool(re.search(r'\bselfdestructcountdown\s*=\s*0\b', unit_content_clean, re.IGNORECASE))
+            has_sdc0      = bool(sdc_value == 0)
             has_buildert2 = bool(cp_block and re.search(r'\bunitgroup\s*=\s*["\']+buildert2["\']+', cp_block, re.IGNORECASE))
             if has_sdc0 and has_buildert2:
                 is_explode_unit = True
@@ -1536,31 +2041,45 @@ class WeaponSyncService:
         # EMP building explosion (selfdestructas = "empblast")
         # e.g. armamex — explodes with EMP blast when destroyed
         if not is_explode_unit:
-            has_empblast = bool(re.search(r'\bselfdestructas\s*=\s*["\']?empblast["\']?', unit_content_clean, re.IGNORECASE))
-            if has_empblast:
+            if selfdestructas and selfdestructas.lower() == 'empblast':
                 is_explode_unit = True
                 print(f"  💥 EMP building detected (empblast)")
 
         if is_explode_unit:
-            # Prefer selfdestructas (contact/self-destruct explosion = higher damage)
-            # Fall back to explodeas (shot-down explosion) if not present
-            sda_match = re.search(r'\bselfdestructas\s*=\s*["\']+([\w]+)["\']+', unit_content_clean, re.IGNORECASE)
-            if not sda_match:
-                sda_match = re.search(r'\bselfdestructas\s*=\s*(\w+)', unit_content_clean, re.IGNORECASE)
-
-            ea_match = re.search(r'\bexplodeas\s*=\s*["\']+([\w]+)["\']+', unit_content_clean, re.IGNORECASE)
-            if not ea_match:
-                ea_match = re.search(r'\bexplodeas\s*=\s*(\w+)', unit_content_clean, re.IGNORECASE)
-
-            if sda_match:
-                explodeas = sda_match.group(1)
+            # Prefer selfdestructas, fall back to explodeas
+            if selfdestructas:
+                explodeas = selfdestructas
                 print(f"     selfdestructas = {explodeas} (preferred over explodeas)")
-            elif ea_match:
-                explodeas = ea_match.group(1)
+            elif explodeas_name:
+                explodeas = explodeas_name
                 print(f"     explodeas = {explodeas}")
             else:
                 print(f"  ⚠️  Explode unit but no selfdestructas/explodeas found — skipping weapon sync")
                 return [], []
+
+        # ── Detect units with non-standard selfdestruct timer ────────────────
+        # Default is 5s. sdc=0 units are already handled above (mines/bombs).
+        # Units like corpyro (sdc=1), corkorg (sdc=10), armbanth (sdc=10) have
+        # a significant self-destruct explosion that should be synced as an
+        # ADDITIONAL weapon alongside their regular weapons.
+        #
+        # Skip trivial explosions (walls, mex, scouts, beacons) — these are
+        # cosmetic and not meaningful as weapons.
+        _TRIVIAL_SELFDESTRUCT = {
+            'wallexplosionmetal', 'wallexplosionconcrete', 'wallexplosionwater',
+            'wallexplosionmetalxl', 'wallexplosionconcretexl',
+            'smallmex', 'smallbuildingexplosiongeneric', 'smallbuildingexplosiongenericselfd',
+            'mediumbuildingexplosiongeneric', 'mediumbuildingexplosiongenericselfd',
+            'tinyexplosiongeneric', 'tinyexplosiongenericselfd',
+            'advmetalmaker',
+        }
+        has_selfdestruct_weapon = False
+        selfdestruct_weapon_name = None
+        if not is_explode_unit and sdc_value is not None and sdc_value != 0 and sdc_value != 5:
+            if selfdestructas and selfdestructas.lower() not in _TRIVIAL_SELFDESTRUCT:
+                selfdestruct_weapon_name = selfdestructas
+                has_selfdestruct_weapon = True
+                print(f"  💥 Non-standard self-destruct timer: {sdc_value}s (selfdestructas = {selfdestructas})")
 
         # ── Parse weapons ──────────────────────────────────────────────────────
         if is_explode_unit and explodeas:
@@ -1578,25 +2097,28 @@ class WeaponSyncService:
             # Normal unit: parse weapondefs from the unit file
             weapons = WeaponParser.parse_weapondefs(unit_content_clean, unit_name)
 
+            # Add self-destruct weapon as extra if non-standard timer
+            if has_selfdestruct_weapon and selfdestruct_weapon_name:
+                sd_content = self.fetch_mine_weapon_file(selfdestruct_weapon_name)
+                if sd_content:
+                    sd_weapon = WeaponParser.parse_mine_weapondef(sd_content, unit_name, selfdestruct_weapon_name)
+                    if sd_weapon:
+                        print(f"     ➕ Added self-destruct weapon: {sd_weapon['name']}")
+                        weapons.append(sd_weapon)
+                    else:
+                        print(f"     ⚠️  Could not parse self-destruct weapon: {selfdestruct_weapon_name}")
+                else:
+                    print(f"     ⚠️  Could not fetch self-destruct weapon file: {selfdestruct_weapon_name}")
+
         if not weapons:
             print(f"  ℹ️  No weapons found")
             return [], []
         
         print(f"  📊 Found {len(weapons)} weapons")
         
-        # Fetch existing weapons from Webflow
-        existing_weapons = self.weapons_api.get_all_items()
-        existing_lookup = {
-            item.get('fieldData', {}).get('name', ''): item
-            for item in existing_weapons
-        }
-
-        # Pre-fetch all Webflow units once (used for carried-units reference lookup)
-        _all_webflow_units = self.units_api.get_all_items()
-        _units_by_name = {
-            u.get('fieldData', {}).get('name', '').lower(): u['id']
-            for u in _all_webflow_units if u.get('id')
-        }
+        # Use cached lookups (or fetch if not cached)
+        existing_lookup = self._get_existing_weapons_lookup()
+        _units_by_name = self._get_units_by_name()
 
         weapon_ids = []
         
@@ -1647,6 +2169,7 @@ class WeaponSyncService:
                 'projectiles': weapon['projectiles'],
                 'velocity': weapon['velocity'],
                 'burst': weapon['burst'],
+                'burst-rate': weapon.get('burst_rate', 0),
                 
                 # Damage
                 'damage-default': weapon['damage_default'],
@@ -1683,19 +2206,53 @@ class WeaponSyncService:
                 
                 # Visual
                 'color': weapon['color'],
+
+                # Velocity (only meaningful for accelerating projectiles)
+                'start-velocity': weapon.get('start_velocity', 0),
+                'weapon-acceleration': weapon.get('weapon_acceleration', 0),
             }
-            
+
             # Add category if detected
             if category_id:
                 field_data['weapon-category'] = category_id
-            
+
             # Add stockpile limit if present
             if weapon['stockpile_limit'] is not None:
                 field_data['stockpile-limit'] = weapon['stockpile_limit']
-            
+
             # Add beamtime only if > 0 (most weapons don't have this)
             if weapon.get('beamtime', 0) > 0:
                 field_data['beamtime'] = weapon['beamtime']
+
+            # Add sound if present — upload WAV→MP3 to Webflow Assets, set file field
+            sound_name = weapon.get('sound_start')
+            if sound_name:
+                if sound_name not in self._sound_url_cache:
+                    gh_headers = self._get_github_headers()
+                    sync_gh_owner  = os.environ.get("ICON_REPO_OWNER", "icexuick")
+                    sync_gh_repo   = os.environ.get("ICON_REPO_NAME", "bar-unit-sync")
+                    sync_gh_branch = os.environ.get("ICON_BRANCH", "main")
+                    sync_gh_token  = os.environ.get("GITHUB_TOKEN", "")
+                    url = resolve_and_upload_sound(
+                        sound_name,
+                        gh_headers,
+                        sync_gh_owner,
+                        sync_gh_repo,
+                        sync_gh_branch,
+                        sync_gh_token,
+                    )
+                    self._sound_url_cache[sound_name] = url
+                sound_url = self._sound_url_cache[sound_name]
+                if sound_url:
+                    field_data['sound-url'] = sound_url
+
+            # Add countdown timer for self-destruct / explode weapons
+            if weapon.get('_is_mine'):
+                # Determine the countdown value:
+                # - sdc_value from the unitdef (None = default 5, 0 = instant)
+                # - For mines with sdc=0 the explosion is on contact, timer = 0
+                timer = sdc_value if sdc_value is not None else 5
+                field_data['countdown-timer'] = timer
 
             # ── Drone carrier: override stats from carried_unit weapons ─────
             if weapon.get('_drone_carried_unit'):
@@ -1753,7 +2310,7 @@ class WeaponSyncService:
 
             # Check if weapon exists
             existing = existing_lookup.get(weapon_name)
-            
+
             if dry_run:
                 # Resolve category slug name for display
                 category_slug = None
@@ -1772,14 +2329,30 @@ class WeaponSyncService:
                     if publish:
                         print(f"       🔍 Would publish")
                 weapon_ids.append("dry-run-id")
+            elif bulk:
+                # ── Bulk mode: queue operations for later ────────────────
+                if existing:
+                    self._pending_updates.append({
+                        'id': existing['id'],
+                        'fieldData': field_data,
+                    })
+                    weapon_ids.append(existing['id'])
+                    self._weapon_name_to_id[weapon_name] = existing['id']
+                    print(f"       📋 Queued update")
+                else:
+                    self._pending_creates.append(field_data)
+                    self._create_names_order.append(weapon_name)
+                    weapon_ids.append(f"pending-create-{weapon_name}")
+                    print(f"       📋 Queued create")
             else:
+                # ── Single mode: execute immediately ─────────────────────
                 if existing:
                     # Update
                     success = self.weapons_api.update_item(existing['id'], field_data)
                     if success:
                         status = "Updated"
                         weapon_ids.append(existing['id'])
-                        
+
                         # Publish if requested
                         if publish:
                             pub_success = self.weapons_api.publish_item(existing['id'])
@@ -1787,7 +2360,7 @@ class WeaponSyncService:
                                 status += " & Published"
                             else:
                                 status += " (publish failed)"
-                        
+
                         print(f"       ✅ {status}")
                 else:
                     # Create
@@ -1795,7 +2368,7 @@ class WeaponSyncService:
                     if weapon_id:
                         status = "Created"
                         weapon_ids.append(weapon_id)
-                        
+
                         # Publish if requested
                         if publish:
                             pub_success = self.weapons_api.publish_item(weapon_id)
@@ -1805,59 +2378,96 @@ class WeaponSyncService:
                                 status += " (publish failed)"
                         else:
                             status += " (draft)"
-                        
+
                         print(f"       ✅ {status}")
-        
+
         return weapon_ids, weapons
     
-    def link_weapons_to_unit(self, unit_name: str, weapon_ids: List[str], weapons_data: List[Dict], dry_run: bool = False, publish: bool = False):
+    def link_weapons_to_unit(self, unit_name: str, weapon_ids: List[str], weapons_data: List[Dict],
+                             dry_run: bool = False, publish: bool = False, bulk: bool = False):
         """
         Link weapons to their parent unit via multi-reference field.
         Also sets unit-level target capabilities based on weapons.
+        When bulk=True, queues the update for later batch execution.
         """
-        if not weapon_ids:
-            return
-        
         # Aggregate unit-level capabilities from weapons
-        has_anti_surface = any(w.get('can_target_surface', False) for w in weapons_data)
-        has_anti_air = any(w.get('can_target_air', False) for w in weapons_data)
-        has_anti_sub = any(w.get('can_target_subs', False) for w in weapons_data)
-        
-        # Fetch unit from Webflow
-        units = self.units_api.get_all_items()
+        if weapon_ids:
+            has_anti_surface = any(w.get('can_target_surface', False) for w in weapons_data)
+            has_anti_air = any(w.get('can_target_air', False) for w in weapons_data)
+            has_anti_sub = any(w.get('can_target_subs', False) for w in weapons_data)
+        else:
+            has_anti_surface = False
+            has_anti_air = False
+            has_anti_sub = False
+
+        # Find unit in Webflow (use cache if available)
+        if self._all_webflow_units_cache is not None:
+            all_units = self._all_webflow_units_cache
+        else:
+            all_units = self.units_api.get_all_items()
         unit = None
-        for u in units:
+        for u in all_units:
             if u.get('fieldData', {}).get('name', '') == unit_name:
                 unit = u
                 break
-        
+
         if not unit:
             print(f"  ⚠️  Unit {unit_name} not found in Webflow - cannot link weapons")
             return
-        
+
+        # In bulk mode, resolve pending-create-xxx placeholders to actual IDs
+        resolved_ids = []
+        for wid in weapon_ids:
+            if wid.startswith("pending-create-"):
+                wname = wid.replace("pending-create-", "")
+                actual_id = self._weapon_name_to_id.get(wname)
+                if actual_id:
+                    resolved_ids.append(actual_id)
+                else:
+                    # Will be resolved after flush; skip for now
+                    resolved_ids.append(wid)
+            else:
+                resolved_ids.append(wid)
+
+        caps = []
+        if has_anti_surface:
+            caps.append("Surface")
+        if has_anti_air:
+            caps.append("Air")
+        if has_anti_sub:
+            caps.append("Sub")
+
         if dry_run:
             print(f"  🔍 Would link {len(weapon_ids)} weapons to unit {unit_name}")
             print(f"     Anti-Surface: {has_anti_surface}, Anti-Air: {has_anti_air}, Anti-Sub: {has_anti_sub}")
             if publish:
                 print(f"     📢 Would publish unit")
+        elif bulk:
+            update_data = {
+                'attached-unit-weapons': resolved_ids,
+                'can-target-surface': has_anti_surface,
+                'can-target-air': has_anti_air,
+                'can-target-subs': has_anti_sub,
+            }
+            self._pending_unit_updates.append({
+                'id': unit['id'],
+                'fieldData': update_data,
+            })
+            if publish:
+                self._pending_unit_publish_ids.append(unit['id'])
+            print(f"  📋 Queued link {len(resolved_ids)} weapons to unit")
+            print(f"     Can target: {', '.join(caps) if caps else 'None'}")
         else:
             # Update unit with weapons reference AND target capabilities
             update_data = {
-                'attached-unit-weapons': weapon_ids,
+                'attached-unit-weapons': resolved_ids,
                 'can-target-surface': has_anti_surface,
                 'can-target-air': has_anti_air,
                 'can-target-subs': has_anti_sub,
             }
             success = self.units_api.update_item(unit['id'], update_data)
             if success:
-                caps = []
-                if has_anti_surface:
-                    caps.append("Surface")
-                if has_anti_air:
-                    caps.append("Air")
-                if has_anti_sub:
-                    caps.append("Sub")
-                print(f"  ✅ Linked {len(weapon_ids)} weapons to unit")
+                print(f"  ✅ Linked {len(resolved_ids)} weapons to unit")
                 print(f"     Can target: {', '.join(caps) if caps else 'None'}")
                 if publish:
                     pub_ok = self.units_api.publish_item(unit['id'])
@@ -1991,9 +2601,15 @@ def main():
     elif args.faction:
         # Faction filter mode - reuse --all logic but filtered by prefix
         prefix = args.faction.strip().lower()
-        print(f"Fetching all units from Webflow (faction: {prefix}*)...")
-        all_units = sync_service.units_api.get_all_items()
-        active_units = [u for u in all_units if not u.get('isArchived', False)]
+
+        # Pre-fetch caches for bulk mode
+        sync_service.prefetch_caches()
+
+        if sync_service._all_webflow_units_cache:
+            active_units = [u for u in sync_service._all_webflow_units_cache if not u.get('isArchived', False)]
+        else:
+            all_units = sync_service.units_api.get_all_items()
+            active_units = [u for u in all_units if not u.get('isArchived', False)]
         active_units = [u for u in active_units if u.get('fieldData', {}).get('name', '').lower().startswith(prefix)]
         print(f"  Found {len(active_units)} active '{prefix}*' units")
         print()
@@ -2010,10 +2626,13 @@ def main():
             print(f"[{idx}/{len(active_units)}] {unit_name}")
             try:
                 weapon_ids, weapons_data = sync_service.sync_weapons_for_unit(
-                    unit_name, dry_run=args.dry_run, publish=args.publish
+                    unit_name, dry_run=args.dry_run, publish=args.publish, bulk=True
+                )
+                sync_service.link_weapons_to_unit(
+                    unit_name, weapon_ids, weapons_data,
+                    dry_run=args.dry_run, publish=args.publish, bulk=True
                 )
                 if weapon_ids:
-                    sync_service.link_weapons_to_unit(unit_name, weapon_ids, weapons_data, dry_run=args.dry_run, publish=args.publish)
                     success_count += 1
                 else:
                     skip_count += 1
@@ -2021,6 +2640,10 @@ def main():
                 print(f"  Error: {e}")
                 error_count += 1
             print()
+
+        # Flush all queued bulk operations
+        if not args.dry_run:
+            created, updated, published = sync_service.flush_bulk_operations(publish=args.publish)
 
         print("=" * 80)
         print(f"SUMMARY ({prefix.upper()})")
@@ -2030,13 +2653,24 @@ def main():
         print(f"Skipped (no weapons): {skip_count}")
         if error_count > 0:
             print(f"Errors        : {error_count}")
+        if not args.dry_run:
+            print(f"Bulk created  : {created}")
+            print(f"Bulk updated  : {updated}")
+            if args.publish:
+                print(f"Bulk published: {published}")
     elif args.mines:
         # Mines-only mode: scan all active Webflow units, detect mines via GitHub file check
         print("💣 MINES + CRAWLING BOMBS MODE")
         print()
-        print("📦 Fetching all units from Webflow...")
-        all_units = sync_service.units_api.get_all_items()
-        active_units = [u for u in all_units if not u.get('isArchived', False)]
+
+        # Pre-fetch caches for bulk mode
+        sync_service.prefetch_caches()
+
+        if sync_service._all_webflow_units_cache:
+            active_units = [u for u in sync_service._all_webflow_units_cache if not u.get('isArchived', False)]
+        else:
+            all_units = sync_service.units_api.get_all_items()
+            active_units = [u for u in all_units if not u.get('isArchived', False)]
         print(f"  Found {len(active_units)} active units — scanning for mines and crawling bombs...")
         print()
 
@@ -2105,12 +2739,13 @@ def main():
             print(f"[{idx}/{len(mine_units)}] {unit_name}")
             try:
                 weapon_ids, weapons_data = sync_service.sync_weapons_for_unit(
-                    unit_name, dry_run=args.dry_run, publish=args.publish
+                    unit_name, dry_run=args.dry_run, publish=args.publish, bulk=True
+                )
+                sync_service.link_weapons_to_unit(
+                    unit_name, weapon_ids, weapons_data,
+                    dry_run=args.dry_run, publish=args.publish, bulk=True
                 )
                 if weapon_ids:
-                    sync_service.link_weapons_to_unit(
-                        unit_name, weapon_ids, weapons_data, dry_run=args.dry_run, publish=args.publish
-                    )
                     success_count += 1
                 else:
                     skip_count += 1
@@ -2118,6 +2753,10 @@ def main():
                 print(f"  ❌ Error: {e}")
                 error_count += 1
             print()
+
+        # Flush all queued bulk operations
+        if not args.dry_run:
+            created, updated, published = sync_service.flush_bulk_operations(publish=args.publish)
 
         print("=" * 80)
         print("MINES SUMMARY")
@@ -2127,54 +2766,66 @@ def main():
         print(f"⏭️  Skipped       : {skip_count}")
         if error_count > 0:
             print(f"❌ Errors        : {error_count}")
+        if not args.dry_run:
+            print(f"Bulk created  : {created}")
+            print(f"Bulk updated  : {updated}")
+            if args.publish:
+                print(f"Bulk published: {published}")
     elif args.all:
-        # All units mode - fetch from Webflow and sync each
-        print("📦 Fetching all units from Webflow...")
-        all_units = sync_service.units_api.get_all_items()
-        
-        # Filter to non-archived units only
-        active_units = [u for u in all_units if not u.get('isArchived', False)]
-        
-        # Note: This syncs ALL active units in Webflow
-        # If you only want build tree units, the main unit sync should have already
-        # archived non-buildable units, so active units = build tree units
-        
+        # All units mode - fetch from Webflow and sync each (bulk mode)
+
+        # Pre-fetch caches for bulk mode (avoids re-fetching per unit)
+        sync_service.prefetch_caches()
+
+        if sync_service._all_webflow_units_cache:
+            active_units = [u for u in sync_service._all_webflow_units_cache if not u.get('isArchived', False)]
+        else:
+            all_units = sync_service.units_api.get_all_items()
+            active_units = [u for u in all_units if not u.get('isArchived', False)]
+
         print(f"  ✅ Found {len(active_units)} active units")
         print(f"  ℹ️  Tip: Run main unit sync first to ensure only build tree units are active")
         print()
-        
+
         success_count = 0
         skip_count = 0
         error_count = 0
-        
+
         for idx, unit in enumerate(active_units, 1):
             unit_name = unit.get('fieldData', {}).get('name', '')
             if not unit_name:
                 skip_count += 1
                 continue
-            
+
             print(f"[{idx}/{len(active_units)}] {unit_name}")
-            
+
             try:
                 weapon_ids, weapons_data = sync_service.sync_weapons_for_unit(
-                    unit_name, 
-                    dry_run=args.dry_run, 
-                    publish=args.publish
+                    unit_name,
+                    dry_run=args.dry_run,
+                    publish=args.publish,
+                    bulk=True
                 )
-                
+
+                sync_service.link_weapons_to_unit(
+                    unit_name, weapon_ids, weapons_data,
+                    dry_run=args.dry_run, publish=args.publish, bulk=True
+                )
                 if weapon_ids:
-                    sync_service.link_weapons_to_unit(unit_name, weapon_ids, weapons_data, dry_run=args.dry_run, publish=args.publish)
                     success_count += 1
                 else:
-                    # No weapons found (builders, eco, etc.)
                     skip_count += 1
-                
+
             except Exception as e:
                 print(f"  ❌ Error: {e}")
                 error_count += 1
-            
+
             print()  # Blank line between units
-        
+
+        # Flush all queued bulk operations
+        if not args.dry_run:
+            created, updated, published = sync_service.flush_bulk_operations(publish=args.publish)
+
         # Summary
         print("=" * 80)
         print("SUMMARY")
@@ -2184,6 +2835,11 @@ def main():
         print(f"⏭️  Skipped (no weapons): {skip_count}")
         if error_count > 0:
             print(f"❌ Errors: {error_count}")
+        if not args.dry_run:
+            print(f"Bulk created  : {created}")
+            print(f"Bulk updated  : {updated}")
+            if args.publish:
+                print(f"Bulk published: {published}")
     else:
         print("ℹ️  No action specified. Use --unit, --all, --mines, or --cleanup")
         print("   Examples:")
