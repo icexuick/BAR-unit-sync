@@ -27,6 +27,7 @@ jobs:
     - name: Run weapons sync (all units)
       env:
         WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         CMD="python sync_weapons_to_webflow.py --all"
         [ "${{ inputs.dry_run }}" = "true" ] && CMD="$CMD --dry-run"

@@ -29,6 +29,7 @@ jobs:
     - name: Run sync (only new/changed)
       env:
         WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         CMD="python sync_units_github_to_webflow.py"
         [ "${{ inputs.dry_run }}" = "true" ] && CMD="$CMD --dry-run"
