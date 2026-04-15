@@ -69,6 +69,9 @@ VEHICLE_ANGLE_DEG = 40       # Angle for vehicles/tanks
 # Commanders: rendered with walking animation and custom angle
 COMMANDER_UNITS = {"armcom", "armdecom", "corcom", "cordecom", "legcom", "legdecom"}
 
+# Units to force cloak-split even if model doesn't have can_cloak flag
+FORCE_CLOAK_UNITS = {"armpb"}
+
 # Units that should NOT deploy (show in idle/closed state)
 # Constructors and anti-nukes
 NO_DEPLOY_PATTERNS = {"consul", "amd"}  # unit names containing these
@@ -86,6 +89,72 @@ GITHUB_BRANCH = os.getenv("ICON_BRANCH", "main")
 
 # Faction IDs in Webflow (used to filter out scavenger units)
 SCAV_FACTION_ID = "6564c6553676389f8ba461dc"
+
+
+# ── Cloak JS ───────────────────────────────────────────────────────────────
+# Check if the loaded unit can cloak (reads userData from the 3D model)
+CLOAK_DETECT_JS = """
+const ctx = window._editorCtx;
+if (!ctx) return false;
+let canCloak = false;
+ctx.scene.traverse(n => {
+    if (n.userData && n.userData.can_cloak) canCloak = true;
+});
+return canCloak;
+"""
+
+# Re-render with a different cloak value, without moving the camera.
+# Used for the second pass of a cloak split (camera is already positioned).
+CLOAK_RERENDER_JS = """
+const ctx = window._editorCtx;
+if (!ctx) return 'ERROR:no ctx';
+const { renderer, composer, camera, ssaoPass, smaaPass } = ctx;
+const scene = ctx.scene;
+const w = arguments[0], h = arguments[1];
+const cloakVal = arguments[2];
+
+// Force cloak uniform on all materials
+scene.traverse(n => {
+    if (!n.isMesh || !n.material) return;
+    const mats = Array.isArray(n.material) ? n.material : [n.material];
+    for (const m of mats) {
+        if (m.userData && m.userData.shader && m.userData.shader.uniforms.cloakAmount) {
+            m.userData.shader.uniforms.cloakAmount.value = cloakVal;
+        }
+    }
+});
+
+// Render at high resolution (camera is already positioned)
+const origPR = renderer.getPixelRatio();
+const container = document.getElementById('model-container');
+const origW = container.offsetWidth, origH = container.offsetHeight;
+
+renderer.setPixelRatio(1);
+renderer.setSize(w, h, false);
+composer.setPixelRatio(1);
+composer.setSize(w, h);
+camera.aspect = 1;
+camera.updateProjectionMatrix();
+if (ssaoPass) ssaoPass.setSize(w, h);
+if (smaaPass) smaaPass.setSize(w, h);
+renderer.setClearColor(0x000000, 0);
+composer.render();
+
+const data = renderer.domElement.toDataURL('image/png');
+
+// Restore original size
+renderer.setPixelRatio(origPR);
+renderer.setSize(origW, origH, false);
+composer.setPixelRatio(origPR);
+composer.setSize(origW, origH);
+camera.aspect = origW / origH;
+camera.updateProjectionMatrix();
+if (ssaoPass) ssaoPass.setSize(origW, origH);
+if (smaaPass) smaaPass.setSize(origW * origPR, origH * origPR);
+
+return data;
+"""
+
 
 
 # ── Render JS ───────────────────────────────────────────────────────────────
@@ -137,6 +206,21 @@ const angleDeg = arguments[2];
 const zoomOut = arguments[3];
 const elevDeg = arguments[4];
 const recenterBase = arguments[5];
+const cloakOverride = (arguments.length > 6 && arguments[6] !== null) ? arguments[6] : null;
+
+// Helper: force cloak uniform on all materials right before render
+function applyCloak() {
+    if (cloakOverride === null) return;
+    scene.traverse(n => {
+        if (!n.isMesh || !n.material) return;
+        const mats = Array.isArray(n.material) ? n.material : [n.material];
+        for (const m of mats) {
+            if (m.userData && m.userData.shader && m.userData.shader.uniforms.cloakAmount) {
+                m.userData.shader.uniforms.cloakAmount.value = cloakOverride;
+            }
+        }
+    });
+}
 
 // ── 0. Recenter on base (exclude aim pieces for XZ, use all for Y) ──
 if (recenterBase) {
@@ -255,6 +339,7 @@ if (scene.environmentRotation) {
 }
 
 controls.update();
+applyCloak();
 composer.render();
 
 // ── 4. Render at high resolution ──
@@ -271,6 +356,7 @@ camera.updateProjectionMatrix();
 if (ssaoPass) ssaoPass.setSize(w, h);
 if (smaaPass) smaaPass.setSize(w, h);
 renderer.setClearColor(0x000000, 0);
+applyCloak();
 composer.render();
 
 const data = renderer.domElement.toDataURL('image/png');
@@ -416,11 +502,8 @@ class UnitRenderer:
         self.keep_walking = False
         self.skip_deploy = False
 
-    def render_unit(self, unit_name: str) -> bytes | None:
-        """
-        Load unit page, wait for 3D model, render at RENDER_SIZE and return
-        the raw PNG bytes. Returns None on failure.
-        """
+    def _load_unit_page(self, unit_name: str) -> bool:
+        """Load unit page and wait for 3D model to initialize. Returns True on success."""
         url = f"{SITE_URL}/{unit_name}?buildpic"
         self.driver.get(url)
 
@@ -432,7 +515,7 @@ class UnitRenderer:
             )
         except Exception:
             print(f"  No 3D model found (timeout)")
-            return None
+            return False
 
         # Wait for _editorCtx to be available (viewer fully initialized)
         for _ in range(40):  # Max 20 seconds (40 x 0.5s)
@@ -442,11 +525,14 @@ class UnitRenderer:
             time.sleep(0.5)
         else:
             print(f"  Viewer not initialized (_editorCtx missing)")
-            return None
+            return False
 
         # Extra settle time for model to finish loading
         time.sleep(MODEL_SETTLE_TIME)
+        return True
 
+    def _setup_animations(self):
+        """Handle walk/deploy/shadow toggles after page load."""
         # Disable walk animation unless --walking flag is set
         if not self.keep_walking:
             toggled = self.driver.execute_script("""
@@ -504,11 +590,18 @@ class UnitRenderer:
             """)
             time.sleep(0.3)
 
-        # Render at high resolution
+    def _capture_render(self, cloak_override: float | None = None) -> bytes | None:
+        """Execute the render JS and return raw PNG bytes.
+        cloak_override: if set, forces cloakAmount uniform to this value right before render
+        (bypasses the animation loop that would otherwise overwrite it).
+        """
         angle = self.angle_override if self.angle_override is not None else CAMERA_ANGLE_DEG
         elev = self.elevation_override if self.elevation_override is not None else CAMERA_ELEVATION_DEG
         zoom = self.zoom_override if self.zoom_override is not None else CAMERA_ZOOM_OUT
-        result = self.driver.execute_script(RENDER_JS, RENDER_SIZE, RENDER_SIZE, angle, zoom, elev, self.recenter_base)
+        result = self.driver.execute_script(
+            RENDER_JS, RENDER_SIZE, RENDER_SIZE, angle, zoom, elev,
+            self.recenter_base, cloak_override,
+        )
 
         if not result or not result.startswith("data:"):
             print(f"  Render failed: {result}")
@@ -518,12 +611,73 @@ class UnitRenderer:
         png_data = base64.b64decode(result.split(",")[1])
         return png_data
 
+    def _capture_cloak_rerender(self, cloak_value: float) -> bytes | None:
+        """Re-render with a different cloak value without moving the camera."""
+        result = self.driver.execute_script(
+            CLOAK_RERENDER_JS, RENDER_SIZE, RENDER_SIZE, cloak_value,
+        )
+        if not result or not result.startswith("data:"):
+            print(f"  Cloak re-render failed: {result}")
+            return None
+        return base64.b64decode(result.split(",")[1])
+
+    def _detect_cloak(self) -> bool:
+        """Check if the loaded unit can cloak (reads userData from 3D model)."""
+        return self.driver.execute_script(CLOAK_DETECT_JS) or False
+
+    def render_unit(self, unit_name: str) -> bytes | None:
+        """
+        Load unit page, wait for 3D model, render at RENDER_SIZE and return
+        the raw PNG bytes. Returns None on failure.
+        """
+        if not self._load_unit_page(unit_name):
+            return None
+        self._setup_animations()
+        return self._capture_render()
+
+    def render_unit_cloak_split(self, unit_name: str) -> tuple[bytes | None, bool, bytes | None]:
+        """
+        Render a unit with cloak split if the unit can cloak.
+        Returns (png_data, is_cloak_split, bbox_ref_png).
+        If the unit can cloak, png_data is a composite with left=cloaked, right=normal,
+        and bbox_ref_png is the normal render (for bounding box detection in png_to_webp).
+        If not, png_data is a normal render, is_cloak_split=False, bbox_ref_png=None.
+        """
+        if not self._load_unit_page(unit_name):
+            return None, False, None
+        self._setup_animations()
+
+        can_cloak = self._detect_cloak() or unit_name in FORCE_CLOAK_UNITS
+        if not can_cloak or unit_name in COMMANDER_UNITS:
+            return self._capture_render(), False, None
+
+        print(f"  Unit can cloak — rendering split (left=cloak, right=normal)")
+
+        # Render 1: Normal — full camera setup + cloak forced to 0.0
+        # (cloak_override is applied inside RENDER_JS right before composer.render(),
+        # so the animation loop cannot overwrite it)
+        png_normal = self._capture_render(cloak_override=0.0)
+        if not png_normal:
+            return None, False, None
+
+        # Render 2: Cloaked — re-render with cloak=1.0, same camera position
+        # Uses CLOAK_RERENDER_JS which skips camera orbit/elevation/light rotation
+        png_cloak = self._capture_cloak_rerender(1.0)
+        if not png_cloak:
+            return png_normal, False, None  # Fallback to normal only
+
+        # Return both renders — diagonal blending happens in png_to_webp after crop
+        return png_normal, True, png_cloak
+
     def close(self):
         self.driver.quit()
 
 
-def png_to_webp(png_data: bytes, padding_pct: float = 0.10) -> bytes:
-    """Smart-crop PNG to tight square around unit, apply contrast/brightness/sharpen, resize to 400x400 WebP."""
+def png_to_webp(png_data: bytes, padding_pct: float = 0.10, cloak_png: bytes | None = None) -> bytes:
+    """Smart-crop PNG to tight square around unit, apply contrast/brightness/sharpen, resize to 400x400 WebP.
+    cloak_png: if provided, the cloaked render to blend diagonally with the normal render.
+    The diagonal blend is applied AFTER cropping so the split is consistent regardless of unit position.
+    """
     import numpy as np
     from PIL import ImageEnhance, ImageFilter
 
@@ -540,8 +694,8 @@ def png_to_webp(png_data: bytes, padding_pct: float = 0.10) -> bytes:
         rgb = ImageEnhance.Color(rgb).enhance(SATURATION_BOOST)
     img = Image.merge("RGBA", (*rgb.split(), a))
 
-    arr = np.array(img)
-    alpha = arr[:, :, 3]
+    # Bounding box from the normal (fully opaque) render
+    alpha = np.array(img)[:, :, 3]
 
     # Find bounding box of opaque pixels (ignore semi-transparent shadow)
     rows = np.any(alpha > 200, axis=1)
@@ -588,6 +742,38 @@ def png_to_webp(png_data: bytes, padding_pct: float = 0.10) -> bytes:
 
     cropped = img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
     cropped = cropped.resize((OUTPUT_SIZE, OUTPUT_SIZE), Image.LANCZOS)
+
+    # If cloak render provided: crop+resize it identically, then diagonal blend
+    if cloak_png:
+        img_cloak = Image.open(io.BytesIO(cloak_png)).convert("RGBA")
+        # Apply same color adjustments
+        r2, g2, b2, a2 = img_cloak.split()
+        rgb2 = Image.merge("RGB", (r2, g2, b2))
+        if BRIGHTNESS_BOOST != 1.0:
+            rgb2 = ImageEnhance.Brightness(rgb2).enhance(BRIGHTNESS_BOOST)
+        if CONTRAST_BOOST != 1.0:
+            rgb2 = ImageEnhance.Contrast(rgb2).enhance(CONTRAST_BOOST)
+        if SATURATION_BOOST != 1.0:
+            rgb2 = ImageEnhance.Color(rgb2).enhance(SATURATION_BOOST)
+        img_cloak = Image.merge("RGBA", (*rgb2.split(), a2))
+        # Same crop + resize
+        cropped_cloak = img_cloak.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+        cropped_cloak = cropped_cloak.resize((OUTPUT_SIZE, OUTPUT_SIZE), Image.LANCZOS)
+
+        # Diagonal blend on the final OUTPUT_SIZE x OUTPUT_SIZE image
+        arr_normal = np.array(cropped, dtype=np.float32)
+        arr_cloak = np.array(cropped_cloak, dtype=np.float32)
+        s = OUTPUT_SIZE
+        xs = np.arange(s, dtype=np.float32) / s
+        ys = np.arange(s, dtype=np.float32) / s
+        xx, yy = np.meshgrid(xs, ys)
+        diagonal = (xx + (1.0 - yy)) / 2.0  # 0=top-left, 1=bottom-right
+        transition_width = 0.05
+        gradient = np.clip((diagonal - 0.5) / transition_width + 0.5, 0.0, 1.0)
+        gradient = gradient[:, :, np.newaxis]
+        # gradient=0 → cloak (top-left), gradient=1 → normal (bottom-right)
+        blended = arr_cloak * (1.0 - gradient) + arr_normal * gradient
+        cropped = Image.fromarray(np.clip(blended, 0, 255).astype(np.uint8), "RGBA")
 
     # Smart sharpen (unsharp mask on RGB, preserve alpha)
     r, g, b, a = cropped.split()
@@ -680,6 +866,8 @@ def main():
                         help="Disable shadows in render")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Override output directory (default: buildpic-render)")
+    parser.add_argument("--site-url", type=str, default=None,
+                        help="Override viewer site URL (e.g. https://blue-and-red.webflow.io/unit)")
     args = parser.parse_args()
 
     if not WEBFLOW_API_TOKEN:
@@ -735,6 +923,11 @@ def main():
 
     output_dir = args.output_dir if args.output_dir else OUTPUT_DIR
     os.makedirs(output_dir, exist_ok=True)
+
+    global SITE_URL
+    if args.site_url:
+        SITE_URL = args.site_url
+        print(f"Using custom site URL: {SITE_URL}")
 
     renderer = UnitRenderer()
     if args.angle is not None:
@@ -821,16 +1014,16 @@ def main():
 
             print(f"[{idx}/{len(units)}] {unit_name} ({unit_type}, T{techlevel}, angle={renderer.angle_override}°, metal={metalcost})")
 
-            # Render
-            png_data = renderer.render_unit(unit_name)
+            # Render (with cloak split detection)
+            png_data, is_cloak_split, png_cloak = renderer.render_unit_cloak_split(unit_name)
             if not png_data:
                 print(f"  Skipped (no render)")
                 skip_count += 1
                 print()
                 continue
 
-            # Convert to WebP
-            webp_data = png_to_webp(png_data, padding_pct=padding)
+            # Convert to WebP (pass cloak render for diagonal blend after crop)
+            webp_data = png_to_webp(png_data, padding_pct=padding, cloak_png=png_cloak)
             webp_filename = f"{unit_name}.webp"
 
             # Save locally
