@@ -623,9 +623,9 @@ class WeaponParser:
                         cluster_number = int(cn_match.group(1))
                     
                     # Sweepfire multiplier (weapon fires N beams simultaneously)
-                    sw_match = re.search(r'\bsweepfire\s*=\s*([0-9]+)', wcp_block, re.IGNORECASE)
+                    sw_match = re.search(r'\bsweepfire\s*=\s*([0-9.]+)', wcp_block, re.IGNORECASE)
                     if sw_match:
-                        sweepfire = int(sw_match.group(1))
+                        sweepfire = float(sw_match.group(1))
 
                     # Cluster def (name of child weapondef)
                     cd_match = re.search(r'\bcluster_def\s*=\s*["\']?(\w+)["\']?', wcp_block, re.IGNORECASE)
@@ -826,8 +826,10 @@ class WeaponParser:
             
             weapon.update(targets)
             
-            # Apply sweepfire multiplier to damage_default (display value in Webflow)
-            if weapon.get('_sweepfire', 1) > 1:
+            # Apply sweepfire multiplier to damage_default (display value in Webflow).
+            # Only for pulsed beams (reload > beamtime); continuous beams sweep
+            # visually but don't multiply single-target DPS.
+            if weapon.get('_sweepfire', 1) > 1 and weapon['reload_time'] > weapon.get('beamtime', 0):
                 weapon['damage_default'] = weapon['damage_default'] * weapon['_sweepfire']
 
             # Skip DPS for Anti-Nuke weapons — they intercept, not damage
@@ -1808,42 +1810,54 @@ class WeaponSyncService:
         return created, updated, published
 
     def fetch_unit_file(self, unit_name: str) -> Optional[str]:
-        """Fetch a single unit .lua file from GitHub by searching recursively."""
+        """Fetch a single unit .lua file from GitHub by searching recursively.
+
+        Returns the file content on success, None if the unit genuinely does
+        not exist, and raises RuntimeError on transient errors (rate limit,
+        network failure) so the caller can skip instead of wiping data.
+        """
+        github_token = os.environ.get("GITHUB_TOKEN")
+        headers = {}
+        if github_token:
+            headers['Authorization'] = f'token {github_token}'
+
+        # First try: direct path (most common)
+        direct_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/refs/heads/{GITHUB_BRANCH}/units/{unit_name}.lua"
         try:
-            github_token = os.environ.get("GITHUB_TOKEN")
-            headers = {}
-            if github_token:
-                headers['Authorization'] = f'token {github_token}'
-            
-            # First try: direct path (most common)
-            direct_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/refs/heads/{GITHUB_BRANCH}/units/{unit_name}.lua"
             response = requests.get(direct_url, headers=headers)
-            if response.status_code == 200:
-                return response.text
-            
-            # Second try: search through units directory using GitHub API
-            print(f"  🔍 Searching for {unit_name}.lua in repository...")
-            search_url = f"https://api.github.com/repos/{GITHUB_REPO}/git/trees/{GITHUB_BRANCH}?recursive=1"
-            response = requests.get(search_url, headers=headers)
-            
-            if response.status_code == 200:
-                tree = response.json()
-                # Only search in units/ directory
-                for item in tree.get('tree', []):
-                    if item['path'].startswith('units/') and item['path'].endswith(f'/{unit_name}.lua'):
-                        # Found it! Fetch the file
-                        file_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/refs/heads/{GITHUB_BRANCH}/{item['path']}"
-                        file_response = requests.get(file_url, headers=headers)
-                        if file_response.status_code == 200:
-                            print(f"  ✅ Found at: {item['path']}")
-                            return file_response.text
-            
-            print(f"  ⚠️  Could not find unit file for {unit_name}")
-            return None
-            
         except Exception as e:
-            print(f"  ❌ Error fetching unit file: {e}")
-            return None
+            raise RuntimeError(f"Network error fetching {unit_name}.lua: {e}")
+        if response.status_code == 200:
+            return response.text
+        if response.status_code not in (404,):
+            raise RuntimeError(f"HTTP {response.status_code} fetching {unit_name}.lua direct")
+
+        # Second try: search through units directory using GitHub API
+        print(f"  🔍 Searching for {unit_name}.lua in repository...")
+        search_url = f"https://api.github.com/repos/{GITHUB_REPO}/git/trees/{GITHUB_BRANCH}?recursive=1"
+        try:
+            response = requests.get(search_url, headers=headers)
+        except Exception as e:
+            raise RuntimeError(f"Network error searching tree for {unit_name}: {e}")
+
+        if response.status_code != 200:
+            raise RuntimeError(f"HTTP {response.status_code} fetching git tree (rate limit?) for {unit_name}")
+
+        tree = response.json()
+        for item in tree.get('tree', []):
+            if item['path'].startswith('units/') and item['path'].endswith(f'/{unit_name}.lua'):
+                file_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/refs/heads/{GITHUB_BRANCH}/{item['path']}"
+                try:
+                    file_response = requests.get(file_url, headers=headers)
+                except Exception as e:
+                    raise RuntimeError(f"Network error fetching {item['path']}: {e}")
+                if file_response.status_code == 200:
+                    print(f"  ✅ Found at: {item['path']}")
+                    return file_response.text
+                raise RuntimeError(f"HTTP {file_response.status_code} fetching {item['path']}")
+
+        print(f"  ⚠️  Unit file genuinely not found for {unit_name}")
+        return None
 
     def _get_github_headers(self) -> dict:
         """Return GitHub auth headers if token is available."""
@@ -1975,10 +1989,18 @@ class WeaponSyncService:
         Returns tuple of (weapon_ids, weapons_data).
         """
         print(f"\nProcessing unit: {unit_name}")
-        
-        # Fetch unit file
-        unit_content = self.fetch_unit_file(unit_name)
+
+        # Fetch unit file. A transient error (rate limit, network) raises
+        # RuntimeError — we return (None, None) so the caller skips the link
+        # update and preserves existing weapon references in Webflow.
+        try:
+            unit_content = self.fetch_unit_file(unit_name)
+        except RuntimeError as e:
+            print(f"  ⚠️  Fetch failed for {unit_name}: {e} — preserving existing links")
+            return None, None
         if not unit_content:
+            # Unit genuinely does not exist in GitHub — return empty lists so
+            # the link update clears weapons (unit is probably being removed).
             return [], []
         
         # Strip Lua comments before parsing
@@ -2177,9 +2199,17 @@ class WeaponSyncService:
                 'damage-vtol': weapon['damage_vtol'],
                 'damage-submarines': weapon['damage_subs'],  # NOT damage-subs
                 
-                # Cost
-                'energy-per-shot': weapon['energy_per_shot'],
-                'metal-per-shot': weapon['metal_per_shot'],
+                # Cost (per salvo: shot × salvosize × burst; continuous beams: shot × 30)
+                'energy-per-shot': (
+                    weapon['energy_per_shot'] * 30
+                    if weapon.get('reload_time', 1) <= weapon.get('beamtime', 0) and weapon.get('beamtime', 0) > 0
+                    else weapon['energy_per_shot'] * weapon['_salvosize'] * weapon['burst']
+                ),
+                'metal-per-shot': (
+                    weapon['metal_per_shot'] * 30
+                    if weapon.get('reload_time', 1) <= weapon.get('beamtime', 0) and weapon.get('beamtime', 0) > 0
+                    else weapon['metal_per_shot'] * weapon['_salvosize'] * weapon['burst']
+                ),
                 
                 # Stockpile
                 'stockpile': weapon['stockpile'],
@@ -2270,7 +2300,11 @@ class WeaponSyncService:
                     field_data['metal-per-shot'] = weapon['_drone_metalcost']
 
                 # Fetch drone unit file and parse its weapons for DPS/damage stats
-                drone_content = self.fetch_unit_file(carried_name)
+                try:
+                    drone_content = self.fetch_unit_file(carried_name)
+                except RuntimeError as e:
+                    print(f"     ⚠️  Could not fetch drone unit {carried_name}: {e}")
+                    drone_content = None
                 if drone_content:
                     drone_content = re.sub(r'--[^\n]*', '', drone_content)
                     drone_weapons = WeaponParser.parse_weapondefs(drone_content, carried_name)
@@ -2383,13 +2417,20 @@ class WeaponSyncService:
 
         return weapon_ids, weapons
     
-    def link_weapons_to_unit(self, unit_name: str, weapon_ids: List[str], weapons_data: List[Dict],
+    def link_weapons_to_unit(self, unit_name: str, weapon_ids, weapons_data,
                              dry_run: bool = False, publish: bool = False, bulk: bool = False):
         """
         Link weapons to their parent unit via multi-reference field.
         Also sets unit-level target capabilities based on weapons.
         When bulk=True, queues the update for later batch execution.
+
+        If weapon_ids is None, skip the link update entirely (signals a fetch
+        failure upstream — we must not wipe existing links).
         """
+        if weapon_ids is None:
+            print(f"  ⏭️  Skipping link update for {unit_name} (fetch failed — existing links preserved)")
+            return
+
         # Aggregate unit-level capabilities from weapons
         if weapon_ids:
             has_anti_surface = any(w.get('can_target_surface', False) for w in weapons_data)

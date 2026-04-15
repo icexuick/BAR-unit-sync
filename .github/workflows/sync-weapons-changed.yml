@@ -2,7 +2,7 @@ name: Sync All Weapons to Webflow (only new/changed)
 
 on:
   schedule:
-    - cron: '0 4 * * 1'  # Every Monday at 4:00 AM UTC (1 hour after units)
+    - cron: '0 6 * * 3'  # Every Wednesday at 06:00 UTC (08:00 Amsterdam, 1 hour after units)
   workflow_dispatch:
     inputs:
       dry_run:

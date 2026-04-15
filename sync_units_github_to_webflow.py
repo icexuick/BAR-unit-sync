@@ -450,6 +450,7 @@ class LuaParser:
             is_bogus_cp = False
             smart_backup = False  # Alternative fire mode flag
             interceptor  = False  # Anti-nuke interceptor flag
+            shared_weapon = None  # shared_weapon: name of the weapondef this one switches with
             stockpile_limit = None
             cluster_number = None
             cluster_def = None
@@ -509,9 +510,13 @@ class LuaParser:
                         if sm_match_cp:
                             spark_maxunits = int(sm_match_cp.group(1))
                     # Sweepfire multiplier
-                    sw_match = re.search(r'\bsweepfire\s*=\s*([0-9]+)', wcp_block, re.IGNORECASE)
+                    sw_match = re.search(r'\bsweepfire\s*=\s*([0-9.]+)', wcp_block, re.IGNORECASE)
                     if sw_match:
-                        sweepfire = int(sw_match.group(1))
+                        sweepfire = float(sw_match.group(1))
+                    # Shared weapon (switchable weapons: linked pair, pick best DPS/range, don't double-count)
+                    sw_match = re.search(r'\bshared_weapon\s*=\s*["\'](\w+)["\']', wcp_block, re.IGNORECASE)
+                    if sw_match:
+                        shared_weapon = sw_match.group(1).lower()
                     # Drone carrier
                     cu_m = re.search(r'\bcarried_unit\s*=\s*["\']([\w]+)["\']', wcp_block, re.IGNORECASE)
                     if cu_m:
@@ -549,10 +554,12 @@ class LuaParser:
                 'area_onhit_time': area_onhit_time,
                 'spark_forkdamage': spark_forkdamage,
                 'spark_maxunits': spark_maxunits,
+                'beamtime':           _val(wblock, 'beamtime', float) or 0.0,
                 'sweepfire':          sweepfire,
                 'drone_carried_unit': drone_carried_unit,
                 'drone_maxunits':     drone_maxunits,
                 'interceptor':        interceptor,
+                'shared_weapon':      shared_weapon,
             }
 
         # ── Step 2: parse weapons = { } to find which weapondefs are used ─────
@@ -589,6 +596,26 @@ class LuaParser:
         max_areaofeffect = 0.0   # Track highest areaofeffect (only from weapons with damage)
         has_non_paralyzer = False  # Track if unit has any real damage weapons
 
+        # ── Pre-pass: identify shared_weapon pairs ──────────────────────────
+        # shared_weapon links two weapondefs that switch (can't fire simultaneously).
+        # We pick the best DPS/range from the pair and count it only once.
+        # Build a set of "secondary" def_keys that should be skipped in the main loop;
+        # their DPS/range is folded into the primary weapon.
+        shared_secondary: set = set()   # def_keys to skip (handled via their partner)
+        shared_partner: dict = {}       # def_key -> partner wd (for DPS/range comparison)
+        for def_key in used_defs:
+            wd = weapondefs.get(def_key)
+            if not wd or not wd.get('shared_weapon'):
+                continue
+            partner_key = wd['shared_weapon'].upper()
+            partner_wd = weapondefs.get(partner_key)
+            if not partner_wd:
+                continue
+            # Only process each pair once: the first one encountered in used_defs is "primary"
+            if def_key not in shared_secondary and partner_key not in shared_secondary:
+                shared_secondary.add(partner_key)
+                shared_partner[def_key] = partner_wd
+
         for def_key in used_defs:
             wd = weapondefs.get(def_key)
             if not wd:
@@ -600,6 +627,10 @@ class LuaParser:
             if 'bogus' in wd['def_name'] or 'mine' in wd['def_name'] or wd.get('is_bogus', False):
                 continue
             if 'detonator' in def_key.lower():
+                continue
+
+            # Skip secondary of a shared_weapon pair (handled via the primary)
+            if def_key in shared_secondary:
                 continue
 
             # Track stockpile limit (typically only one weapon has this)
@@ -615,7 +646,7 @@ class LuaParser:
                 # Track range even for paralyzer weapons
                 if wd['range'] > weapon_range:
                     weapon_range = wd['range']
-                
+
                 # Calculate PPS (Paralyse Per Second)
                 # PPS = damage / reload (how much paralysis damage per second)
                 dmg = wd['dmg_vtol'] if wd['dmg_vtol'] > wd['dmg_default'] else wd['dmg_default']
@@ -623,7 +654,7 @@ class LuaParser:
                     reload = wd['reloadtime'] or 1.0
                     paralyze_dps = (dmg * (1.0 / reload)) * wd['salvosize'] * wd['burst'] * wd['projectiles']
                     result['pps'] += paralyze_dps
-                
+
                 # Add to weapon_table with EMP prefix
                 emp_map = {
                     'BeamLaser':          'EMP-BeamLaser',
@@ -633,10 +664,10 @@ class LuaParser:
                 }
                 emp_wtype = emp_map.get(wtype, f'EMP-{wtype}')
                 weapon_table[emp_wtype] = weapon_table.get(emp_wtype, 0) + 1
-                
+
                 # Skip normal DPS calculation
                 continue
-            
+
             # Mark that we have at least one non-paralyzer weapon
             has_non_paralyzer = True
 
@@ -649,10 +680,37 @@ class LuaParser:
                 weapon_table[wtype] = weapon_table.get(wtype, 0) + 1
                 continue
 
+            # ── Helper: calculate DPS for a single weapondef ──
+            def _calc_weapon_dps(w):
+                """Return (main_dps, dot_dps, effective_range) for a weapondef dict."""
+                d = w['dmg_vtol'] if w['dmg_vtol'] > w['dmg_default'] else w['dmg_default']
+                if d <= 0:
+                    return 0.0, 0.0, w['range']
+                # Sweepfire multiplier: only for pulsed beams (reload > beamtime).
+                # Continuous beams (reload ≈ beamtime) sweep visually but don't multiply DPS.
+                if w.get('sweepfire', 1) > 1 and w['reloadtime'] > w.get('beamtime', 0):
+                    d = d * w['sweepfire']
+                rl = w['reloadtime'] or 1.0
+                from sync_weapons_to_webflow import KAMIKAZE_WEAPONS  # noqa: E402
+                is_kami = (unit_name in KAMIKAZE_WEAPONS and
+                           def_key.lower() == KAMIKAZE_WEAPONS[unit_name])
+                mdps = d if is_kami else (d * (1.0 / rl)) * w['salvosize'] * w['burst'] * w['projectiles']
+                ddps = 0.0
+                if w.get('cluster_number') and w.get('cluster_def'):
+                    cwd = weapondefs.get(w['cluster_def'].upper())
+                    if cwd:
+                        ddps = (w['cluster_number'] * cwd['dmg_default'] / rl) * w['salvosize'] * w['burst'] * w['projectiles']
+                if w.get('area_onhit_damage') and w.get('area_onhit_time'):
+                    ddps += (w['area_onhit_damage'] * w['area_onhit_time'] / rl) * w['salvosize'] * w['burst'] * w['projectiles']
+                if w.get('spark_forkdamage') and w.get('spark_maxunits'):
+                    fork = w['dmg_default'] * w['burst'] * w['spark_forkdamage'] * w['spark_maxunits']
+                    ddps += (fork / rl) * w['salvosize'] * w['projectiles']
+                return mdps, ddps, w['range']
+
             # Pick higher damage tier (vtol vs default) — mirrors Lua logic
             dmg = wd['dmg_vtol'] if wd['dmg_vtol'] > wd['dmg_default'] else wd['dmg_default']
             weapon_dot_dps = 0
-            
+
             # Check if this is a cluster weapon - DOT only (not main DPS)
             if wd.get('cluster_number') and wd.get('cluster_def'):
                 cluster_def_key = wd['cluster_def'].upper()
@@ -694,8 +752,10 @@ class LuaParser:
             if dmg <= 0:
                 continue
 
-            # Apply sweepfire multiplier to damage (display + DPS)
-            if wd.get('sweepfire', 1) > 1:
+            # Apply sweepfire multiplier to damage (display + DPS).
+            # Only for pulsed beams (reload > beamtime); continuous beams sweep
+            # visually but don't multiply single-target DPS.
+            if wd.get('sweepfire', 1) > 1 and wd['reloadtime'] > wd.get('beamtime', 0):
                 dmg = dmg * wd['sweepfire']
 
             # Kamikaze weapons: DPS = full alpha damage (unit dies on firing)
@@ -708,14 +768,14 @@ class LuaParser:
                 # Calculate main projectile DPS (WITHOUT cluster/napalm)
                 reload = wd['reloadtime'] or 1.0
                 main_dps = (dmg * (1.0 / reload)) * wd['salvosize'] * wd['burst'] * wd['projectiles']
-            
+
             # Add napalm DOT if present
             if wd.get('area_onhit_damage') and wd.get('area_onhit_time'):
                 # Napalm DOT = (area_damage × area_time) / reload
                 napalm_total = wd['area_onhit_damage'] * wd['area_onhit_time']
                 napalm_dot = (napalm_total / reload) * wd['salvosize'] * wd['burst'] * wd['projectiles']
                 weapon_dot_dps += napalm_dot
-            
+
             # Add lightning chain damage if present
             if wd.get('spark_forkdamage') and wd.get('spark_maxunits'):
                 # Lightning DOT = (default_damage × burst × spark_forkdamage × spark_maxunits) / reload
@@ -724,7 +784,18 @@ class LuaParser:
                 total_fork_dmg = fork_dmg_per_target * wd['spark_maxunits']
                 lightning_dot = (total_fork_dmg / reload) * wd['salvosize'] * wd['projectiles']
                 weapon_dot_dps += lightning_dot
-            
+
+            # ── shared_weapon: pick max DPS/range from the switchable pair ──
+            partner_wd = shared_partner.get(def_key)
+            if partner_wd:
+                p_dps, p_dot, p_range = _calc_weapon_dps(partner_wd)
+                if p_dps > main_dps:
+                    main_dps = p_dps
+                if p_dot > weapon_dot_dps:
+                    weapon_dot_dps = p_dot
+                if p_range > wd['range']:
+                    wd = {**wd, 'range': p_range}  # use partner's range if higher
+
             # Accumulate separately
             dps += main_dps
             result['dot'] += weapon_dot_dps
@@ -881,21 +952,29 @@ class LuaParser:
                 unit_data['_can_target_air'] = weapon_result['can_target_air']
                 unit_data['_can_target_subs'] = weapon_result['can_target_subs']
             
-            # Extract key-value pairs (excluding nested tables like customparams)
-            # Pattern for simple key = value pairs (not followed by {)
+            # Extract key-value pairs from top-level only.
+            # First, strip all nested { ... } blocks so we don't pick up
+            # values from weapondefs, customparams, buildoptions, etc.
+            flat_block = unit_block
+            while True:
+                # Find innermost { ... } (no nested braces inside) and remove it
+                m = re.search(r'\w+\s*=\s*\{[^{}]*\}', flat_block)
+                if not m:
+                    # Also remove bare { ... } blocks (e.g. damage = { ... })
+                    m = re.search(r'\{[^{}]*\}', flat_block)
+                    if not m:
+                        break
+                flat_block = flat_block[:m.start()] + flat_block[m.end():]
+
             kv_pattern = r'(\w+)\s*=\s*([^,\n{]+)'
-            
-            for match in re.finditer(kv_pattern, unit_block):
+
+            for match in re.finditer(kv_pattern, flat_block):
                 key = match.group(1).strip()
                 value = match.group(2).strip()
-                
-                # Skip if this is the start of a nested table
-                if key.lower() == 'customparams':
-                    continue
-                
+
                 # Clean up the value
                 value = value.rstrip(',')
-                
+
                 # Remove quotes from strings
                 if value.startswith('"') and value.endswith('"'):
                     value = value[1:-1]
@@ -912,7 +991,7 @@ class LuaParser:
                     value = True
                 elif value.lower() == 'false':
                     value = False
-                
+
                 unit_data[key] = value
             
             # Parse customparams for energyconv (metal makers)
