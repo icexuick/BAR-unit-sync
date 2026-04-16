@@ -1885,7 +1885,8 @@ class UnitSyncService:
           2. movementclass = AHOVER2                          → bot (special: Platypus)
           3. movementclass = HOVER7                           → ship (special)
           4. *HOVER* + maxwaterdepth < 1                      → hovercraft
-          5. *HOVER* + maxwaterdepth >= 1                     → ship
+          5. HOVER3 + maxwaterdepth >= 1                      → vehicle (amphibious tank)
+          6. *HOVER* + maxwaterdepth >= 1                     → ship
           6. *BOAT* / *SHIP* / *UBOAT* / *SUB*               → ship
           7. *RAPTOR*                                         → chicken
           8. *COMMANDER* / *BOT* / *KBOT*                     → bot
@@ -1923,8 +1924,10 @@ class UnitSyncService:
             if 'HOVER' in mc:
                 if maxwaterdepth is None or maxwaterdepth < 1:
                     return "hovercraft"
-                else:
-                    return "ship"
+                # HOVER3 + maxwaterdepth >= 1: amphibious tank (e.g. legfloat)
+                if mc == 'HOVER3':
+                    return "vehicle"
+                return "ship"
 
             # 5. Naval
             if any(kw in mc for kw in ('BOAT', 'SHIP', 'UBOAT', 'SUB')):
