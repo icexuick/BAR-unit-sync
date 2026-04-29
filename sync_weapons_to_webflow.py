@@ -713,8 +713,9 @@ class WeaponParser:
                 'turn_rate': int(_val(wblock, 'turnrate', float) or 0),
                 'water_weapon': _bool(wblock, 'waterweapon'),
                 'beamtime': round(_val(wblock, 'beamtime', float) or 0, 5),
+                'minintensity': _val(wblock, 'minintensity', float) or 0.0,
                 'large_beam_laser': _bool(wblock, 'largebeamlaser'),
-                
+
                 # Shield properties (for weapontype = Shield)
                 # Parse from shield = { } sub-block
                 'shield_power': 0,
@@ -826,10 +827,12 @@ class WeaponParser:
             
             weapon.update(targets)
             
-            # Apply sweepfire multiplier to damage_default (display value in Webflow).
-            # Only for pulsed beams (reload > beamtime); continuous beams sweep
-            # visually but don't multiply single-target DPS.
-            if weapon.get('_sweepfire', 1) > 1 and weapon['reload_time'] > weapon.get('beamtime', 0):
+            # Sweepfire (BeamLaser bonus stage): damage display gets the multiplier so
+            # the Webflow value matches BAR's gui_info.lua tooltip.
+            # Only for pulsed beams (reload > beamtime); continuous beams don't.
+            sweepfire_active = (weapon.get('_sweepfire', 1) > 1 and
+                                weapon['reload_time'] > weapon.get('beamtime', 0))
+            if sweepfire_active:
                 weapon['damage_default'] = weapon['damage_default'] * weapon['_sweepfire']
 
             # Skip DPS for Anti-Nuke weapons — they intercept, not damage
@@ -920,6 +923,15 @@ class WeaponParser:
                 if is_kamikaze and dmg > 0:
                     weapon['dps'] = dmg
                     weapon['dot'] = 0
+                    weapon['pps'] = 0
+                # Sweepfire: BAR gui_info.lua maxdps formula
+                #   maxdps = (base_damage * sweepfire) / max(minIntensity, 0.5)
+                # damage_default has already been multiplied by sweepfire above,
+                # so divide by max(minIntensity, 0.5) — NOT by reload.
+                elif sweepfire_active and dmg > 0:
+                    min_intensity = max(weapon.get('minintensity', 0.0), 0.5)
+                    weapon['dps'] = int(round(dmg / min_intensity))
+                    weapon['dot'] = int(round(dot_dps)) if dot_dps > 0 else 0
                     weapon['pps'] = 0
                 # Calculate main projectile DPS (without DOT)
                 elif dmg > 0 and weapon['reload_time'] > 0:
@@ -1119,6 +1131,7 @@ class WeaponParser:
             'turn_rate':        int(_val(wblock, 'turnrate', float) or 0),
             'water_weapon':     _bool(wblock, 'waterweapon'),
             'beamtime':         round(_val(wblock, 'beamtime', float) or 0, 5),
+            'minintensity':     _val(wblock, 'minintensity', float) or 0.0,
             'large_beam_laser': _bool(wblock, 'largebeamlaser'),
 
             # Shield (mines won't have this but keep structure consistent)

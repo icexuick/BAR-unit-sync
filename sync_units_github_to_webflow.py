@@ -370,6 +370,25 @@ class LuaParser:
         return None
 
     @staticmethod
+    def _eval_numeric_expr(expr: str) -> Optional[float]:
+        """
+        Safely evaluate a simple Lua numeric expression like "1/70", "0.5", "2*3".
+        Only digits, dot, whitespace, and + - * / ( ) are allowed.
+        Returns None if the expression is unsafe or cannot be evaluated.
+        """
+        if expr is None:
+            return None
+        s = expr.strip()
+        if not s:
+            return None
+        if not re.fullmatch(r'[0-9.\s*/+\-()]+', s):
+            return None
+        try:
+            return float(eval(s, {"__builtins__": {}}, {}))
+        except Exception:
+            return None
+
+    @staticmethod
     def parse_weapons(unit_block: str, unit_paths_map: dict = None, unit_name: str = "") -> Dict:
         """
         Parse weapondefs + weapons blocks from a unit block to compute:
@@ -555,6 +574,7 @@ class LuaParser:
                 'spark_forkdamage': spark_forkdamage,
                 'spark_maxunits': spark_maxunits,
                 'beamtime':           _val(wblock, 'beamtime', float) or 0.0,
+                'minintensity':       _val(wblock, 'minintensity', float) or 0.0,
                 'sweepfire':          sweepfire,
                 'drone_carried_unit': drone_carried_unit,
                 'drone_maxunits':     drone_maxunits,
@@ -686,14 +706,18 @@ class LuaParser:
                 d = w['dmg_vtol'] if w['dmg_vtol'] > w['dmg_default'] else w['dmg_default']
                 if d <= 0:
                     return 0.0, 0.0, w['range']
-                # Sweepfire multiplier: only for pulsed beams (reload > beamtime).
-                # Continuous beams (reload ≈ beamtime) sweep visually but don't multiply DPS.
-                if w.get('sweepfire', 1) > 1 and w['reloadtime'] > w.get('beamtime', 0):
-                    d = d * w['sweepfire']
                 rl = w['reloadtime'] or 1.0
                 from sync_weapons_to_webflow import KAMIKAZE_WEAPONS  # noqa: E402
                 is_kami = (unit_name in KAMIKAZE_WEAPONS and
                            def_key.lower() == KAMIKAZE_WEAPONS[unit_name])
+                # Sweepfire (BeamLaser bonus stage): use BAR's gui_info.lua maxdps formula
+                #   maxdps = (damage * sweepfire) / max(minIntensity, 0.5)
+                # Reload/salvo/burst/projectiles do NOT apply here.
+                if w.get('sweepfire', 1) > 1 and w['reloadtime'] > w.get('beamtime', 0):
+                    min_intensity = max(w.get('minintensity', 0.0), 0.5)
+                    mdps = (d * w['sweepfire']) / min_intensity
+                    ddps = 0.0
+                    return mdps, ddps, w['range']
                 mdps = d if is_kami else (d * (1.0 / rl)) * w['salvosize'] * w['burst'] * w['projectiles']
                 ddps = 0.0
                 if w.get('cluster_number') and w.get('cluster_def'):
@@ -752,18 +776,23 @@ class LuaParser:
             if dmg <= 0:
                 continue
 
-            # Apply sweepfire multiplier to damage (display + DPS).
-            # Only for pulsed beams (reload > beamtime); continuous beams sweep
-            # visually but don't multiply single-target DPS.
-            if wd.get('sweepfire', 1) > 1 and wd['reloadtime'] > wd.get('beamtime', 0):
-                dmg = dmg * wd['sweepfire']
+            # Sweepfire (BeamLaser bonus stage): use BAR's gui_info.lua maxdps formula
+            #   maxdps = (damage * sweepfire) / max(minIntensity, 0.5)
+            # Skips the regular reload/salvo/burst/projectiles math.
+            sweepfire_active = (wd.get('sweepfire', 1) > 1 and
+                                wd['reloadtime'] > wd.get('beamtime', 0))
 
             # Kamikaze weapons: DPS = full alpha damage (unit dies on firing)
             from sync_weapons_to_webflow import KAMIKAZE_WEAPONS  # noqa: E402
             is_kamikaze = (unit_name in KAMIKAZE_WEAPONS and
                            def_key.lower() == KAMIKAZE_WEAPONS[unit_name])
-            if is_kamikaze:
+            if sweepfire_active:
+                min_intensity = max(wd.get('minintensity', 0.0), 0.5)
+                main_dps = (dmg * wd['sweepfire']) / min_intensity
+                reload = wd['reloadtime'] or 1.0  # still needed below for napalm/spark DOT
+            elif is_kamikaze:
                 main_dps = dmg
+                reload = wd['reloadtime'] or 1.0
             else:
                 # Calculate main projectile DPS (WITHOUT cluster/napalm)
                 reload = wd['reloadtime'] or 1.0
@@ -1000,14 +1029,18 @@ class LuaParser:
                 cp_block = LuaParser.extract_balanced_braces(unit_block, cp_match.end() - 1)
                 if cp_block:
                     # Energy conversion capacity (metal make rate)
-                    ecc_match = re.search(r'\benergyconv_capacity\s*=\s*([0-9.]+)', cp_block, re.IGNORECASE)
+                    ecc_match = re.search(r'\benergyconv_capacity\s*=\s*([0-9.\s*/+\-()]+?)\s*[,\}]', cp_block, re.IGNORECASE)
                     if ecc_match:
-                        unit_data['energyconv_capacity'] = float(ecc_match.group(1))
-                    
-                    # Energy conversion efficiency
-                    ece_match = re.search(r'\benergyconv_efficiency\s*=\s*([0-9.]+)', cp_block, re.IGNORECASE)
+                        ecc_value = LuaParser._eval_numeric_expr(ecc_match.group(1))
+                        if ecc_value is not None:
+                            unit_data['energyconv_capacity'] = ecc_value
+
+                    # Energy conversion efficiency (may be expression like "1/70")
+                    ece_match = re.search(r'\benergyconv_efficiency\s*=\s*([0-9.\s*/+\-()]+?)\s*[,\}]', cp_block, re.IGNORECASE)
                     if ece_match:
-                        unit_data['energyconv_efficiency'] = float(ece_match.group(1))
+                        ece_value = LuaParser._eval_numeric_expr(ece_match.group(1))
+                        if ece_value is not None:
+                            unit_data['energyconv_efficiency'] = ece_value
             
             return unit_data
             
