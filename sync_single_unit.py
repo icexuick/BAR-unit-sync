@@ -14,6 +14,7 @@ Usage:
 import os
 import sys
 import argparse
+import urllib.parse
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -119,7 +120,15 @@ def sync_single_unit(unit_name: str, dry_run: bool = False, auto_publish: bool =
             webflow_fields['paralyze-multiplier'] = float(github_data['paralyzemultiplier'])
         except:
             pass
-    
+
+    # github-unitdef-path: relative path used by the Webflow page template to
+    # build the GitHub source link. Strip leading "units/" (template prepends
+    # it) and URL-encode so spaces become %20.
+    raw_path = unit_file.get('path', '')
+    if raw_path:
+        rel_path = raw_path[len('units/'):] if raw_path.startswith('units/') else raw_path
+        webflow_fields['github-unitdef-path'] = urllib.parse.quote(rel_path, safe='/')
+
     if not webflow_fields:
         print("⚠️  Warning: No fields to sync")
         return False

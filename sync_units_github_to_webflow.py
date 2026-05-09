@@ -22,6 +22,7 @@ import math
 import hashlib
 import io
 import time
+import urllib.parse
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 from dotenv import load_dotenv
@@ -2142,6 +2143,15 @@ class UnitSyncService:
 
         # Handle is-scavenger (boolean, derived from file path)
         webflow_fields['is-scavenger'] = 'scavengers' in github_data.get('_file_path', '').lower()
+
+        # Handle github-unitdef-path (relative path used by the Webflow page
+        # template to build the GitHub source link). Strip the leading
+        # "units/" prefix (the template prepends it) and URL-encode path
+        # segments so spaces become %20 (e.g. "T2 Bots" → "T2%20Bots").
+        raw_path = github_data.get('_file_path', '')
+        if raw_path:
+            rel_path = raw_path[len('units/'):] if raw_path.startswith('units/') else raw_path
+            webflow_fields['github-unitdef-path'] = urllib.parse.quote(rel_path, safe='/')
         
         # Handle unit name from language file (plain text field)
         if 'unitname' in github_data and github_data['unitname']:
@@ -2908,6 +2918,7 @@ class UnitSyncService:
             'cloak-cost-moving':   'Cloak Cost Moving',
             'paralyze-multiplier': 'Paralyze Mult    ',
             'transportable-by':   'Transportable By ',
+            'github-unitdef-path': 'GitHub Path      ',
         }
         
         stats = {
