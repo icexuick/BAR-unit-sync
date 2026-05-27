@@ -94,6 +94,7 @@ FIELD_MAPPING = {
     "metalcost": "metal-cost",
     "buildtime": "build-cost",
     "energymake": "energy-make",
+    "energyupkeep": "energyupkeep",
     "metalmake": "metal-create",
     "metalstorage": "metal-storage",
     "energystorage": "energy-storage",
@@ -2075,10 +2076,11 @@ class UnitSyncService:
                 
                 # Ensure numeric values are properly typed
                 # Integer fields
-                if webflow_key in ["energy-cost", "metal-cost", "build-cost", "energy-make", 
-                                   "buildpower", "health", "speed", "sightrange", "radarrange", 
-                                   "metal-make", "jammerrange", "mass", "cloak-cost", 
-                                   "metal-storage", "energy-storage", "seismic-detector-range"]:
+                if webflow_key in ["energy-cost", "metal-cost", "build-cost", "energy-make",
+                                   "buildpower", "health", "speed", "sightrange", "radarrange",
+                                   "metal-make", "jammerrange", "mass", "cloak-cost",
+                                   "metal-storage", "energy-storage", "seismic-detector-range",
+                                   "energyupkeep"]:
                     try:
                         # Convert to int if it's a number
                         if isinstance(value, (int, float)):
@@ -2108,6 +2110,18 @@ class UnitSyncService:
                 webflow_fields['seismic-detector-range'] = seismic_val
             else:
                 webflow_fields.pop('seismic-detector-range', None)
+
+        # Handle energyupkeep: only send if > 0
+        if 'energyupkeep' in github_data:
+            upkeep_val = github_data['energyupkeep']
+            try:
+                upkeep_val = int(float(upkeep_val))
+            except:
+                upkeep_val = 0
+            if upkeep_val > 0:
+                webflow_fields['energyupkeep'] = upkeep_val
+            else:
+                webflow_fields.pop('energyupkeep', None)
         
         # Handle paralyzemultiplier separately (from customparams, decimal field)
         if 'paralyzemultiplier' in github_data:
@@ -2913,6 +2927,7 @@ class UnitSyncService:
             'metal-make':          'Sonar Range      ',
             'jammerrange':         'Jammer Range     ',
             'energy-make':         'Energy Make      ',
+            'energyupkeep':        'Energy Upkeep    ',
             'buildpower':          'Build Power      ',
             'cloak-cost':          'Cloak Cost       ',
             'cloak-cost-moving':   'Cloak Cost Moving',
