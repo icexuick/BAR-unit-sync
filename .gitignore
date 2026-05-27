@@ -44,6 +44,9 @@ env/
 .unit_cache.json
 .buildable_cache.json
 
+# Local debug dumps
+test-area/
+
 # Logs
 *.log
 logs/
