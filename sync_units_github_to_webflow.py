@@ -2958,7 +2958,14 @@ class UnitSyncService:
             'skipped':   0,
             'errors':    0,
         }
-        
+        # Per-unit breakdown for the end-of-run report: list of (unit_name, reason)
+        report = {
+            'updated': [],
+            'created': [],
+            'skipped': [],
+            'errored': [],
+        }
+
         for unit_file in unit_files:
             unit_name = unit_file['name']
             file_path = unit_file['path']
@@ -2972,6 +2979,7 @@ class UnitSyncService:
             if not lua_content:
                 print(f"  ❌ Failed to fetch file")
                 stats['errors'] += 1
+                report['errored'].append((unit_name, 'failed to fetch file'))
                 print()
                 continue
             
@@ -2980,6 +2988,7 @@ class UnitSyncService:
             if not github_data:
                 print(f"  ❌ Failed to parse file")
                 stats['errors'] += 1
+                report['errored'].append((unit_name, 'failed to parse file'))
                 print()
                 continue
             
@@ -3006,6 +3015,7 @@ class UnitSyncService:
             if not webflow_fields:
                 print(f"  ⚠️  No fields to update")
                 stats['skipped'] += 1
+                report['skipped'].append((unit_name, 'no fields to update'))
                 print()
                 continue
             
@@ -3106,6 +3116,7 @@ class UnitSyncService:
                 if not changes and not force:
                     print(f"  ✓ Already up-to-date — no changes needed")
                     stats['skipped'] += 1
+                    report['skipped'].append((unit_name, 'already up-to-date'))
                     print()
                     continue
             
@@ -3140,8 +3151,10 @@ class UnitSyncService:
             if dry_run:
                 if is_new_unit:
                     print(f"  🔍 DRY RUN — would create as draft in Webflow")
+                    report['skipped'].append((unit_name, 'dry run — would create'))
                 else:
                     print(f"  🔍 DRY RUN — no changes written to Webflow")
+                    report['skipped'].append((unit_name, 'dry run — would update'))
                 stats['skipped'] += 1
                 print()
                 continue
@@ -3156,6 +3169,7 @@ class UnitSyncService:
                 if new_id:
                     print(f"  ✅ Created as draft (id: {new_id})")
                     stats['created'] += 1
+                    report['created'].append((unit_name, 'created as draft'))
                     # Add to webflow_lookup + id_map so buildoptions of later
                     # units in this same run can resolve this new item
                     self._webflow_id_map[unit_name] = new_id
@@ -3163,6 +3177,7 @@ class UnitSyncService:
                 else:
                     print(f"  ❌ Create failed")
                     stats['errors'] += 1
+                    report['errored'].append((unit_name, 'create failed'))
             else:
                 # ── UPDATE existing item ──────────────────────────────────────
                 item_id = webflow_item['id']
@@ -3173,6 +3188,7 @@ class UnitSyncService:
                     if not self.webflow.unarchive_item(item_id):
                         print(f"  ❌ Failed to unarchive — skipping")
                         stats['errors'] += 1
+                        report['errored'].append((unit_name, 'failed to unarchive'))
                         print()
                         continue
 
@@ -3186,11 +3202,16 @@ class UnitSyncService:
                     if auto_publish:
                         if self.webflow.publish_item(item_id):
                             print(f"  📤 Published successfully")
+                            report['updated'].append((unit_name, 'updated + published'))
                         else:
                             print(f"  ⚠️  Failed to publish")
+                            report['updated'].append((unit_name, 'updated but publish failed'))
+                    else:
+                        report['updated'].append((unit_name, 'updated (draft)'))
                 else:
                     print(f"  ❌ Update failed")
                     stats['errors'] += 1
+                    report['errored'].append((unit_name, 'update failed'))
 
             stats['processed'] += 1
             print()
@@ -3205,7 +3226,50 @@ class UnitSyncService:
         print(f"Skipped (no changes)  : {stats['skipped']}")
         print(f"Errors                : {stats['errors']}")
         print()
-        
+
+        # Show errored + skipped units inline so they're easy to spot
+        if report['errored']:
+            print(f"❌ Errored units ({len(report['errored'])}):")
+            for name, reason in report['errored']:
+                print(f"   - {name}: {reason}")
+            print()
+
+        # Write a full per-unit report to sync_report.txt (overwritten each run)
+        from datetime import datetime, timezone
+        report_path = "sync_report.txt"
+        try:
+            with open(report_path, 'w', encoding='utf-8') as rf:
+                rf.write("=" * 80 + "\n")
+                rf.write("Beyond All Reason - Unit Sync Report\n")
+                rf.write(f"Generated: {datetime.now(timezone.utc).isoformat()}\n")
+                if dry_run:
+                    rf.write("Mode: DRY RUN (no changes written)\n")
+                rf.write("=" * 80 + "\n\n")
+                rf.write("Summary\n")
+                rf.write(f"  Total processed : {stats['processed']}\n")
+                rf.write(f"  Created (draft) : {stats['created']}\n")
+                rf.write(f"  Updated         : {stats['updated']}\n")
+                rf.write(f"  Skipped         : {stats['skipped']}\n")
+                rf.write(f"  Errors          : {stats['errors']}\n\n")
+
+                for title, key in (
+                    ("ERRORED", 'errored'),
+                    ("SKIPPED", 'skipped'),
+                    ("CREATED", 'created'),
+                    ("UPDATED", 'updated'),
+                ):
+                    entries = report[key]
+                    rf.write("-" * 80 + "\n")
+                    rf.write(f"{title} ({len(entries)})\n")
+                    rf.write("-" * 80 + "\n")
+                    for name, reason in sorted(entries):
+                        rf.write(f"  {name:<24} {reason}\n")
+                    rf.write("\n")
+            print(f"📝 Full report written to {report_path}")
+        except Exception as e:
+            print(f"⚠️  Could not write {report_path}: {e}")
+        print()
+
         if dry_run:
             print("ℹ️  This was a DRY RUN - no actual changes were made")
             print("   Run without --dry-run to apply changes")

@@ -51,6 +51,7 @@ test-area/
 *.log
 logs/
 *.log.*
+sync_report.txt
 
 # Testing
 .pytest_cache/
