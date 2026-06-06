@@ -372,6 +372,16 @@ class LuaParser:
         return None
 
     @staticmethod
+    def strip_lua_comments(text: str) -> str:
+        """
+        Remove Lua line comments ('-- ...' to end of line) from text.
+        Used so commented-out entries (e.g. --[28] = "armmg") are not parsed
+        as real values. Block comments (--[[ ]]) are not expected in the
+        blocks where this is used.
+        """
+        return re.sub(r'--[^\n]*', '', text)
+
+    @staticmethod
     def _eval_numeric_expr(expr: str) -> Optional[float]:
         """
         Safely evaluate a simple Lua numeric expression like "1/70", "0.5", "2*3".
@@ -962,9 +972,12 @@ class LuaParser:
             bo_match = re.search(r'buildoptions\s*=\s*\{', unit_block, re.IGNORECASE)
             if bo_match:
                 bo_block = LuaParser.extract_balanced_braces(unit_block, bo_match.end() - 1)
-                # Only count as having buildoptions if there's at least one entry
-                if bo_block and re.search(r'"(\w+)"', bo_block):
-                    unit_data['_has_buildoptions'] = True
+                # Only count as having buildoptions if there's at least one
+                # real (non-commented) entry
+                if bo_block:
+                    bo_block = LuaParser.strip_lua_comments(bo_block)
+                    if re.search(r'"(\w+)"', bo_block):
+                        unit_data['_has_buildoptions'] = True
 
             # Parse weapons: DPS, range, weapon type list, stockpile limit, impulse, aoe, targets
             weapon_result = LuaParser.parse_weapons(unit_block, unit_paths_map=unit_paths_map, unit_name=unit_name)
@@ -1080,6 +1093,8 @@ class LuaParser:
             if not bo_block:
                 return []
 
+            # Strip commented-out entries (e.g. --[28] = "armmg") before parsing
+            bo_block = LuaParser.strip_lua_comments(bo_block)
             return re.findall(r'"(\w+)"', bo_block)
 
         except Exception:
